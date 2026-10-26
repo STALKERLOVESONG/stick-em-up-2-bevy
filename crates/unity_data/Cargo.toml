@@ -1,0 +1,9 @@
+[package]
+name = "unity_data"
+description = "Readers for the exported Unity 5.1 project data (scenes, prefabs, animation clips, controllers, project settings)."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+unity_compat = { path = "../unity_compat" }

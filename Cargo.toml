@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/unity_compat", "crates/unity_data", "crates/sticks_sim", "crates/sticks_game"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Gameplay-relevant numerics must stay close to the Unity-era float behavior, so keep
+# release builds free of fast-math style surprises (Rust never enables them by default).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

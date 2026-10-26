@@ -1,0 +1,23 @@
+# Build output
+/target/
+
+# Old pre-workspace prototype (not part of the build; delete it locally too)
+/src/
+
+# Local session material: dev-script screenshots, handoff notes, source backups
+/captures/
+/.claude-handoff/
+
+# Screenshots and other images (they show the original game's art);
+# keep only what is deliberately put in docs/
+*.png
+*.jpg
+!docs/**/*.png
+!docs/**/*.jpg
+
+# Editor / OS clutter
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

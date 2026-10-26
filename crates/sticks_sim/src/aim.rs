@@ -1,0 +1,313 @@
+//! Aiming the character's weapon: the weapon bone's `LookAt`, hand IK onto the weapon's grips
+//! and the head's look-at, as `CharacterControl2D.CorrectAndSetAim` and `OnAnimatorIK` ask for.
+//!
+//! TODO(UNCERTAIN): Mecanim's IK solver is not recoverable from the data. The arms use an
+//! analytic two-bone solution that keeps the animated elbow's side of the shoulder→hand line;
+//! the head turns by the shortest rotation that takes its forward axis to the target, limited to
+//! 90° (`SetLookAtWeight(1)` leaves `clampWeight` at its 0.5 default, which Unity documents as
+//! half of the possible range). Spine and eyes are not involved (`bodyWeight` and `eyesWeight`
+//! default to 0).
+
+use unity_compat::{Quat, Vec2, Vec3};
+
+use crate::character::DEFAULT_Z;
+use crate::pose::{CharacterRigModel, HumanPose, RigPose, bone};
+use crate::visual::BodyPlacement;
+use crate::weapons::weapon_rotation;
+
+/// Which weapon is up and where it points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AimedWeapon {
+    /// Index into `Rig::weapons`.
+    pub weapon: usize,
+    /// The corrected aim vector (see [`crate::weapons::corrected_aim`]), in world space.
+    pub aim: Vec2,
+    pub face_right: bool,
+}
+
+/// `SetLookAtWeight(1)` with the default clamp weight of 0.5: up to 90° from forward.
+const LOOK_AT_LIMIT: f32 = std::f32::consts::FRAC_PI_2;
+
+/// Rigidly turn a bone and everything below it about `pivot`.
+fn rotate_subtree(model: &CharacterRigModel, pose: &mut RigPose, root: usize, pivot: Vec3, q: Quat) {
+    let bones = &model.rig().bones;
+    let mut in_subtree = vec![false; bones.len()];
+    in_subtree[root] = true;
+    // Parents precede children in the rig's order.
+    for i in root..bones.len() {
+        if let Some(p) = bones[i].parent {
+            if in_subtree[p] {
+                in_subtree[i] = true;
+            }
+        }
+        if in_subtree[i] {
+            let (position, rotation) = pose.world[i];
+            pose.world[i] = (pivot + q * (position - pivot), q * rotation);
+        }
+    }
+}
+
+/// Elbow and wrist positions that put the wrist on `goal` (or as close as the arm reaches),
+/// keeping the elbow on the side of the shoulder→goal line where it already is.
+fn two_bone(shoulder: Vec3, elbow: Vec3, wrist: Vec3, goal: Vec3) -> (Vec3, Vec3) {
+    let upper = (elbow - shoulder).magnitude();
+    let lower = (wrist - elbow).magnitude();
+    let to_goal = goal - shoulder;
+    let reach = to_goal.magnitude();
+    if reach < 1e-6 || upper < 1e-6 || lower < 1e-6 {
+        return (elbow, wrist);
+    }
+    let direction = to_goal * (1.0 / reach);
+    let distance = reach.clamp((upper - lower).abs() + 1e-4, upper + lower - 1e-4);
+    let along = (upper * upper - lower * lower + distance * distance) / (2.0 * distance);
+    let height = (upper * upper - along * along).max(0.0).sqrt();
+    let bent = (elbow - shoulder) - direction * (elbow - shoulder).dot(direction);
+    let side = if bent.magnitude() > 1e-6 { bent.normalized() } else { direction.cross(Vec3::FORWARD).normalized() };
+    (shoulder + direction * along + side * height, shoulder + direction * distance)
+}
+
+impl CharacterRigModel {
+    /// [`Self::solve`] plus the aiming pass. `facing` is the world rotation of the character
+    /// object (the pose lives in its local space); the result is again in that local space.
+    pub fn solve_aimed(&self, pose: &HumanPose, facing: Quat, aimed: &AimedWeapon) -> RigPose {
+        let mut solved = self.solve(pose);
+        let rig = self.rig();
+        let Some(weapon) = rig.weapons.get(aimed.weapon) else { return solved };
+        let to_local = facing.conjugate();
+
+        // `weaponPivot.LookAt(pivot + aim, up)`: the weapon bone's world rotation is replaced.
+        let (weapon_position, old_rotation) = solved.world[weapon.bone];
+        let new_rotation = to_local * weapon_rotation(aimed.aim, aimed.face_right);
+        rotate_subtree(self, &mut solved, weapon.bone, weapon_position, new_rotation * old_rotation.conjugate());
+
+        // `OnAnimatorIK`: look at `correctedAim + weaponPivot.position`, hands onto the grips.
+        let target = weapon_position + to_local * Vec3::new(aimed.aim.x, aimed.aim.y, 0.0);
+        self.look_at_with_head(&mut solved, target);
+        for (upper, lower, hand, grip) in [
+            (bone::LEFT_UPPER_ARM, bone::LEFT_LOWER_ARM, bone::LEFT_HAND, weapon.left_hand),
+            (bone::RIGHT_UPPER_ARM, bone::RIGHT_LOWER_ARM, bone::RIGHT_HAND, weapon.right_hand),
+        ] {
+            let (Some(grip), Some(upper), Some(lower), Some(hand)) = (grip, self.bone_of(upper), self.bone_of(lower), self.bone_of(hand)) else {
+                continue;
+            };
+            let goal = solved.position(grip);
+            self.reach_with_arm(&mut solved, upper, lower, hand, goal);
+        }
+        solved
+    }
+
+    fn look_at_with_head(&self, solved: &mut RigPose, target: Vec3) {
+        let Some(head) = self.bone_of(bone::HEAD) else { return };
+        let (position, rotation) = solved.world[head];
+        let current = rotation * self.head_forward();
+        let wanted = target - position;
+        if wanted.magnitude() < 1e-4 {
+            return;
+        }
+        let turn = Quat::from_to(current, wanted);
+        // Limit the turn to the clamp range.
+        let w = turn.w.clamp(-1.0, 1.0).abs();
+        let angle = 2.0 * w.acos();
+        let turn = if angle > LOOK_AT_LIMIT {
+            let k = LOOK_AT_LIMIT / angle;
+            Quat::nlerp(Quat::IDENTITY, turn, k)
+        } else {
+            turn
+        };
+        rotate_subtree(self, solved, head, position, turn);
+    }
+
+    fn reach_with_arm(&self, solved: &mut RigPose, upper: usize, lower: usize, hand: usize, goal: Vec3) {
+        let (s, e, w) = (solved.position(upper), solved.position(lower), solved.position(hand));
+        let (new_elbow, new_wrist) = two_bone(s, e, w, goal);
+        // Swing the upper arm so the elbow lands on its new spot, then the forearm for the wrist.
+        rotate_subtree(self, solved, upper, s, Quat::from_to(e - s, new_elbow - s));
+        let wrist_now = solved.position(hand);
+        rotate_subtree(self, solved, lower, new_elbow, Quat::from_to(wrist_now - new_elbow, new_wrist - new_elbow));
+    }
+
+    /// The head's look direction in its own frame. Mecanim measures look-at against the
+    /// humanoid T-pose, in which the character looks along the avatar's +z: the axis is the
+    /// avatar's +z expressed in the head's rest (skeleton pose) frame.
+    ///
+    /// (An earlier version took +z of the *prefab's* bone chain; in the animated pose that axis
+    /// points into the screen, so looking up rolled the head the wrong way.)
+    fn head_forward(&self) -> Vec3 {
+        let Some(node) = self.avatar().bone_node.get(bone::HEAD).copied().flatten() else { return Vec3::FORWARD };
+        let rest = crate::pose::rest_world(self.avatar());
+        rest[node].1.conjugate() * Vec3::FORWARD
+    }
+}
+
+/// A character's rig for one frame: the solved bones (in the character's local space) and where
+/// that space sits in the world.
+#[derive(Clone, Debug)]
+pub struct PosedCharacter {
+    pub solved: RigPose,
+    pub placement: BodyPlacement,
+}
+
+impl PosedCharacter {
+    /// World position of a rig bone.
+    pub fn world_position(&self, bone: usize) -> Vec3 {
+        self.placement.position + self.placement.rotation * self.solved.position(bone)
+    }
+}
+
+impl CharacterRigModel {
+    /// The character as it stands this frame: the animated pose, turned to face `face_right`,
+    /// with the equipped weapon aimed (`weapon` is `None` when nothing is equipped). The model is
+    /// turned ±90° about Y so that its local +z is the facing direction.
+    pub fn pose_character(&self, pose: &HumanPose, position: Vec2, face_right: bool, weapon: Option<AimedWeapon>) -> PosedCharacter {
+        let placement = BodyPlacement {
+            position: Vec3::new(position.x, position.y, DEFAULT_Z),
+            rotation: Quat::euler_y_degrees(if face_right { 90.0 } else { -90.0 }),
+        };
+        let solved = match weapon {
+            Some(aimed) => self.solve_aimed(pose, placement.rotation, &aimed),
+            None => self.solve(pose),
+        };
+        PosedCharacter { solved, placement }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pose::ClipPose;
+    use crate::weapons::corrected_aim;
+    use std::path::PathBuf;
+    use unity_data::humanoid::parse_avatar;
+    use unity_data::rig::load_man_rig;
+
+    fn model() -> Option<(CharacterRigModel, PathBuf)> {
+        let root = std::env::var_os("STICK_EXPORT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../assets_exported/ExportedProject"));
+        let assets = root.join("Assets");
+        assets.join("Game").is_dir().then_some(())?;
+        let rig = load_man_rig(&assets).unwrap();
+        let avatar = parse_avatar(&std::fs::read_to_string(assets.join("Avatar/ManAvatar.asset")).unwrap()).unwrap();
+        Some((CharacterRigModel::new(avatar, rig).unwrap(), assets))
+    }
+
+    fn pose_of(assets: &std::path::Path, clip: &str, t: f32) -> HumanPose {
+        let text = std::fs::read_to_string(assets.join(format!("AnimationClip/{clip}.anim"))).unwrap();
+        ClipPose::compile(&unity_data::anim::parse_clip(&text).unwrap()).sample(t)
+    }
+
+    fn aimed(aim: Vec2) -> AimedWeapon {
+        AimedWeapon { weapon: 0, aim: corrected_aim(aim, Vec2::new(1.0, 0.0), true), face_right: true }
+    }
+
+    const RIGHT: f32 = 90.0;
+
+    fn facing() -> Quat {
+        Quat::euler_y_degrees(RIGHT)
+    }
+
+    #[test]
+    fn two_bone_reaches_a_reachable_goal_and_keeps_the_limb_lengths() {
+        let (s, e, w) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.3, -0.1, 0.0), Vec3::new(0.6, 0.0, 0.0));
+        let goal = Vec3::new(0.4, 0.3, 0.1);
+        let (e2, w2) = two_bone(s, e, w, goal);
+        assert!((w2 - goal).magnitude() < 1e-4);
+        assert!((((e2 - s).magnitude()) - (e - s).magnitude()).abs() < 1e-4);
+        assert!((((w2 - e2).magnitude()) - (w - e).magnitude()).abs() < 1e-4);
+        // Out of reach: straight arm pointing at the goal.
+        let far = Vec3::new(3.0, 0.0, 0.0);
+        let (e3, w3) = two_bone(s, e, w, far);
+        let straight = (w3 - s).magnitude();
+        assert!((straight - ((e - s).magnitude() + (w - e).magnitude())).abs() < 1e-3);
+        assert!(((e3 - s).normalized() - (w3 - s).normalized()).magnitude() < 0.05, "an out-of-reach arm is almost straight");
+    }
+
+    #[test]
+    fn both_hands_end_on_the_weapon_grips_for_every_aim() {
+        let Some((model, assets)) = model() else { return };
+        let rifle = &model.rig().weapons[0];
+        let (left_grip, right_grip) = (rifle.left_hand.unwrap(), rifle.right_hand.unwrap());
+        let left_hand = model.bone_of(bone::LEFT_HAND).unwrap();
+        let right_hand = model.bone_of(bone::RIGHT_HAND).unwrap();
+        for clip in ["Idle", "Run"] {
+            let pose = pose_of(&assets, clip, 0.15);
+            for aim in [Vec2::new(5.0, 0.0), Vec2::new(4.0, 3.0), Vec2::new(3.0, -3.0), Vec2::new(0.2, 5.0)] {
+                let solved = model.solve_aimed(&pose, facing(), &aimed(aim));
+                for (hand, grip, name) in [(left_hand, left_grip, "left"), (right_hand, right_grip, "right")] {
+                    let miss = (solved.position(hand) - solved.position(grip)).magnitude();
+                    // The grips sit within an arm's reach of the shoulders in every pose.
+                    assert!(miss < 0.02, "{clip} aim {aim:?}: {name} hand misses its grip by {miss}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arm_lengths_survive_the_ik() {
+        let Some((model, assets)) = model() else { return };
+        let pose = pose_of(&assets, "Idle", 0.0);
+        let base = model.solve(&pose);
+        let solved = model.solve_aimed(&pose, facing(), &aimed(Vec2::new(4.0, 3.0)));
+        for (a, b) in [(bone::LEFT_UPPER_ARM, bone::LEFT_LOWER_ARM), (bone::LEFT_LOWER_ARM, bone::LEFT_HAND), (bone::RIGHT_UPPER_ARM, bone::RIGHT_LOWER_ARM), (bone::RIGHT_LOWER_ARM, bone::RIGHT_HAND)] {
+            let (a, b) = (model.bone_of(a).unwrap(), model.bone_of(b).unwrap());
+            let before = (base.position(b) - base.position(a)).magnitude();
+            let after = (solved.position(b) - solved.position(a)).magnitude();
+            assert!((before - after).abs() < 1e-3, "bone {a}->{b}: {before} vs {after}");
+        }
+    }
+
+    #[test]
+    fn the_weapon_bone_points_along_the_aim() {
+        let Some((model, assets)) = model() else { return };
+        let pose = pose_of(&assets, "Idle", 0.0);
+        let rifle = &model.rig().weapons[0];
+        for aim in [Vec2::new(5.0, 0.0), Vec2::new(4.0, 3.0), Vec2::new(3.0, -3.0)] {
+            let a = aimed(aim);
+            let solved = model.solve_aimed(&pose, facing(), &a);
+            // Local +z of the weapon bone is the aim direction, expressed in the world.
+            let forward = facing() * (solved.rotation(rifle.bone) * Vec3::FORWARD);
+            let want = Vec3::new(a.aim.x, a.aim.y, 0.0).normalized();
+            assert!((forward - want).magnitude() < 1e-4, "aim {aim:?}: {forward:?} vs {want:?}");
+            // The launch point rides on that bone, ahead of the shoulder along the aim.
+            let launch = solved.position(rifle.launch_point.unwrap());
+            let pivot = solved.position(rifle.bone);
+            let along = facing() * (launch - pivot);
+            assert!(along.dot(want) > 0.3, "the muzzle is in front of the pivot: {along:?}");
+        }
+    }
+
+    #[test]
+    fn aiming_up_tilts_the_head_and_its_helmet() {
+        let Some((model, assets)) = model() else { return };
+        let pose = pose_of(&assets, "Idle", 0.0);
+        let helmet = model.rig().colors.helmet;
+        let roll = |aim: Vec2| {
+            let solved = model.solve_aimed(&pose, facing(), &aimed(aim));
+            (facing() * solved.rotation(helmet)).euler_angles_degrees().z
+        };
+        let level = roll(Vec2::new(5.0, 0.0));
+        let up = roll(Vec2::new(4.0, 4.0));
+        let down = roll(Vec2::new(4.0, -4.0));
+        // Facing right (+x), looking up turns the helmet counter-clockwise on screen (positive
+        // Unity z angle: +x towards +y) and looking down turns it clockwise.
+        let signed = |a: f32, b: f32| ((a - b + 540.0) % 360.0) - 180.0;
+        let (du, dd) = (signed(up, level), signed(down, level));
+        assert!(du > 5.0, "looking up must tilt the head up: {du}");
+        assert!(dd < -5.0, "looking down must tilt the head down: {dd}");
+        // Looking straight ahead leaves the face level.
+        assert!(signed(level, 0.0).abs() < 5.0, "level aim: {level}");
+    }
+
+    #[test]
+    fn no_weapon_selected_leaves_the_animation_untouched() {
+        let Some((model, assets)) = model() else { return };
+        let pose = pose_of(&assets, "Run", 0.2);
+        let base = model.solve(&pose);
+        let a = AimedWeapon { weapon: 99, aim: Vec2::new(1.0, 0.0), face_right: true };
+        let solved = model.solve_aimed(&pose, facing(), &a);
+        for i in 0..base.world.len() {
+            assert_eq!(base.position(i), solved.position(i));
+        }
+    }
+}
+

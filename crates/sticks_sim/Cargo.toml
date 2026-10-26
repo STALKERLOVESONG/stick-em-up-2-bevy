@@ -1,0 +1,11 @@
+[package]
+name = "sticks_sim"
+description = "Engine-independent simulation rules of Stick 'Em Up 2: 2D collision, the character controller, animator-driven locomotion and the camera rig."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+spade = "2"
+unity_compat = { path = "../unity_compat" }
+unity_data = { path = "../unity_data" }

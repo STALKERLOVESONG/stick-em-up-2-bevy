@@ -1,0 +1,8 @@
+[package]
+name = "unity_compat"
+description = "Numeric and timing behavior of Unity 5.1 that is observable in Stick 'Em Up 2 (Mathf, SmoothDamp, fixed-step loop)."
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
