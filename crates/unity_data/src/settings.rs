@@ -129,3 +129,47 @@ Physics2DSettings:
         assert!(!s.layers_collide(12, 8));
     }
 }
+
+/// `TagManager.asset` `m_SortingLayers`: the layers' `uniqueID`s (as the `int` a renderer's
+/// `m_SortingLayerID` stores them) in draw order.
+pub fn parse_sorting_layers(text: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("m_SortingLayers:") {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if let Some(id) = trimmed.strip_prefix("uniqueID:") {
+                if let Ok(v) = id.trim().parse::<i64>() {
+                    // Serialized unsigned; renderers keep the same bits as a signed 32-bit int.
+                    out.push(v as u32 as i32 as i64);
+                }
+            } else if trimmed.starts_with("m_") {
+                // The next field of the tag manager.
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod sorting_tests {
+    #[test]
+    fn sorting_layers_in_order() {
+        let text = "TagManager:\n  m_SortingLayers:\n  - name: In-Game\n    uniqueID: 4258750573\n    locked: 0\n  - name: Default\n    uniqueID: 0\n    locked: 0\n  m_Other: 1\n";
+        let layers = super::parse_sorting_layers(text);
+        assert_eq!(layers, vec![-36216723, 0]);
+        assert_eq!(super::sorting_rank(&layers, 0), 1);
+        assert_eq!(super::sorting_rank(&layers, -36216723), 0);
+        assert_eq!(super::sorting_rank(&layers, 12345), 1, "unknown: Default");
+    }
+}
+
+/// The draw-order rank of a renderer's `m_SortingLayerID` (unknown ids rank as "Default").
+pub fn sorting_rank(layers: &[i64], id: i64) -> i32 {
+    layers.iter().position(|&l| l == id).or_else(|| layers.iter().position(|&l| l == 0)).unwrap_or(0) as i32
+}

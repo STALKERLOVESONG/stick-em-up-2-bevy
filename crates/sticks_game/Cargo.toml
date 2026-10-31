@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 # `wav`: the Assault Rifle clips are WAV files (Vorbis is a default feature).
 bevy = { version = "0.19", features = ["wav"] }
+sticks_net = { path = "../sticks_net" }
+sticks_p2p = { path = "../sticks_p2p" }
 sticks_sim = { path = "../sticks_sim" }
 unity_compat = { path = "../unity_compat" }
 unity_data = { path = "../unity_data" }

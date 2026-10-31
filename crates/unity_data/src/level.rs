@@ -60,6 +60,8 @@ pub struct Surface {
     pub shadow_plane_z: Option<f32>,
     /// `PolygonColliderRenderer.maximumTriangleArea` (default 600; 0 = no refinement).
     pub maximum_triangle_area: f64,
+    /// A `FakeParallax` on the object or an ancestor, which moves the drawn mesh with the camera.
+    pub parallax: Option<crate::sprites::Parallax>,
 }
 
 impl Collider {
@@ -147,11 +149,23 @@ pub struct Level {
     pub prepooled: Vec<String>,
     /// `RandomizeSpawnPoints` on "Player Spawn Points": campaign spawn points are shuffled too.
     pub randomize_spawn_points: bool,
+    /// Built-in mesh renderers (Japan's sky plane).
+    pub meshes: Vec<crate::scenery::SceneMesh>,
+    /// `HorizontalScroller2D` bodies (Japan's clouds).
+    pub scrollers: Vec<crate::scenery::Scroller>,
+    /// Breakable objects (Japan's hanging lamps).
+    pub props: Vec<crate::scenery::LevelProp>,
+    /// The "Level Ender" set-ups that are active when the level loads.
+    pub enders: Vec<LevelEnder>,
+    /// `LevelTips.tips` (`None` without a `LevelTips` in the scene).
+    pub tips: Option<Vec<LevelTip>>,
+    /// The "Versus Game Ender" (versus levels).
+    pub versus_ender: Option<VersusEnder>,
 }
 
 /// What `AllClientControlTypes` reports offline with the keyboard and mouse as the only input
-/// (the sorted, comma-joined processor class names).
-/// TODO: other control types (gamepads, Steam controller, touch) are not reported yet.
+/// (the sorted, comma-joined processor class names; `sticks_sim::devices::control_types_name`
+/// builds it for other combinations).
 pub const OFFLINE_CONTROL_TYPES: &str = "KeyboardAndMouseProcessor";
 
 /// A level text: the text mesh itself (never a "Text Shadow" copy), its `TextShadower`
@@ -160,6 +174,8 @@ pub const OFFLINE_CONTROL_TYPES: &str = "KeyboardAndMouseProcessor";
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelText {
     pub text: crate::fonts::SceneText,
+    /// The object's layer: layer 5 ("UI") texts are seen by the UI camera, not the level's.
+    pub layer: u8,
     pub shadower: Option<(Option<String>, f32)>,
     pub explodable: bool,
 }
@@ -205,7 +221,7 @@ pub fn level_texts(scene: &Scene, scripts: &ScriptIndex, control_types: &str) ->
             Some((caster, font, plane)) if *caster == index => Some((font.clone(), *plane)),
             _ => None,
         });
-        out.push(LevelText { text: text.clone(), shadower, explodable: has(&go, "ExplodableText") });
+        out.push(LevelText { text: text.clone(), layer: go.layer(), shadower, explodable: has(&go, "ExplodableText") });
     }
     out
 }
@@ -274,6 +290,12 @@ pub struct LauncherModifier {
 pub struct EnemySpawn {
     /// Name of the `Man` root (`Enemy`, `Enemy Still`, `Enemy Ducking`, ...).
     pub name: String,
+    /// File id of the root object (what level scripts such as `DestroyParticularEnemyLevelEnder`
+    /// refer to).
+    pub object: FileId,
+    /// An enabled `EnemyRegistrar` on the controller: the enemy announces itself on `Start`
+    /// (`EnemyRegistrar.NewEnemy`), so the level enders count it.
+    pub registered: bool,
     /// World position of the root (the character's feet).
     pub position: [f32; 3],
     /// Local position of the controller object under the root: the origin the targeter, the
@@ -295,13 +317,36 @@ pub struct EnemySpawn {
     pub move_to_first_target: bool,
     pub fire_and_move_if_necessary: bool,
     pub duck: bool,
-    /// `Emerge` is present (not implemented yet).
-    pub emerge: bool,
+    /// An enabled `Emerge`.
+    pub emerge: Option<EmergeSpec>,
     /// `DeactivateOffScreen.radius`.
     pub deactivate_off_screen: Option<f32>,
     /// `CharacterColorSetter.bodyColor` (`Color32`) and `helmetColor` (`Color`).
     pub body_color: Option<[u8; 4]>,
     pub helmet_color: Option<[f32; 4]>,
+}
+
+/// `Emerge`: the enemy waits behind the scenery (z 0, layer 25, its firing subsumed) until a
+/// player enters `trigger_object`'s `TriggeredByAnyPlayer`, walks `point_x` sideways aiming, then
+/// takes its place (z -0.1, its own layer) and `post_emerge_wait_time` later starts fighting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmergeSpec {
+    pub point_x: f32,
+    /// The object carrying the activation `TriggeredByAnyPlayer` (and its trigger collider).
+    pub trigger_object: Option<FileId>,
+    pub post_emerge_wait_time: f32,
+    /// Classes of `unsubsumeOnCompletion` (subsumed until done).
+    pub unsubsume_on_completion: Vec<String>,
+    /// Classes of `enableOnCompletion` (disabled until done).
+    pub enable_on_completion: Vec<String>,
+}
+
+/// The first object in `go`'s tree (itself first) carrying `class_name`.
+fn first_in_children(go: &GameObject<'_>, scripts: &ScriptIndex, class_name: &str) -> Option<FileId> {
+    if mono_fields(go, scripts, class_name).is_some() {
+        return Some(go.id());
+    }
+    go.children().iter().find_map(|c| first_in_children(c, scripts, class_name))
 }
 
 pub(crate) fn scaling_of(body: &Value) -> DifficultyScaling {
@@ -335,6 +380,8 @@ pub(crate) fn enemy_of(scene: &Scene, controller: &GameObject<'_>, scripts: &Scr
     }
     let mut enemy = EnemySpawn {
         name: root.name().to_owned(),
+        object: root.id(),
+        registered: false,
         position: root.world_affine().t,
         controller_offset: offset,
         starting_health: None,
@@ -347,7 +394,7 @@ pub(crate) fn enemy_of(scene: &Scene, controller: &GameObject<'_>, scripts: &Scr
         move_to_first_target: false,
         fire_and_move_if_necessary: false,
         duck: false,
-        emerge: false,
+        emerge: None,
         deactivate_off_screen: None,
         body_color: None,
         helmet_color: None,
@@ -372,7 +419,29 @@ pub(crate) fn enemy_of(scene: &Scene, controller: &GameObject<'_>, scripts: &Scr
             Some("MoveToFirstTarget") => enemy.move_to_first_target = enabled,
             Some("FireAndMoveIfNecessary") => enemy.fire_and_move_if_necessary = enabled,
             Some("Duck") => enemy.duck = enabled,
-            Some("Emerge") => enemy.emerge = enabled,
+            Some("Emerge") if enabled => {
+                // A component reference → the class of that component.
+                let classes = |key: &str| -> Vec<String> {
+                    b.get(key).map(Value::as_seq).unwrap_or(&[]).iter().filter_map(|r| scene.get(r.file_id()?)).filter_map(|d| script_name(d, scripts).map(str::to_owned)).collect()
+                };
+                // `activationTrigger` (a `TriggeredByAnyPlayer`), else the first one below the
+                // controller (`GetComponentInChildren`).
+                let trigger_object = b
+                    .get("activationTrigger")
+                    .and_then(Value::file_id)
+                    .filter(|&id| id != 0)
+                    .and_then(|id| scene.get(id))
+                    .and_then(|d| d.body.get("m_GameObject").and_then(Value::file_id))
+                    .or_else(|| first_in_children(controller, scripts, "TriggeredByAnyPlayer"));
+                enemy.emerge = Some(EmergeSpec {
+                    point_x: b.f32_of("emergePointX").unwrap_or(-3.0),
+                    trigger_object,
+                    post_emerge_wait_time: b.f32_of("postEmergeWaitTime").unwrap_or(0.4),
+                    unsubsume_on_completion: classes("unsubsumeOnCompletion"),
+                    enable_on_completion: classes("enableOnCompletion"),
+                });
+            }
+            Some("EnemyRegistrar") => enemy.registered = enabled,
             Some("DeactivateOffScreen") if enabled => enemy.deactivate_off_screen = Some(b.f32_of("radius").unwrap_or(10.0)),
             Some("CharacterColorSetter") => {
                 // `Color32` serializes as one little-endian `rgba` integer.
@@ -515,6 +584,7 @@ fn colliders_of(go: &GameObject<'_>, scripts: &ScriptIndex, out: &mut Vec<Collid
                                 axis_y: xy(world.transform_vector([0.0, 1.0, 0.0])),
                                 shadow_plane_z,
                                 maximum_triangle_area: r.str_of("maximumTriangleArea").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(600.0),
+                                parallax: crate::sprites::parallax_of(*go, &|c: &crate::yaml::Document| script_name(c, scripts)),
                             })
                         });
                         push(Shape::Polygon(pts), trigger, surface, enabled, out);
@@ -558,6 +628,12 @@ fn colliders_of(go: &GameObject<'_>, scripts: &ScriptIndex, out: &mut Vec<Collid
 
 /// Extract the gameplay-relevant parts of a parsed level scene.
 pub fn extract_level(name: &str, scene: &Scene, scripts: &ScriptIndex) -> Level {
+    extract_level_with(name, scene, scripts, OFFLINE_CONTROL_TYPES)
+}
+
+/// [`extract_level`] for the control types in use (`AllClientControlTypes`, which picks the
+/// `ControlTypeDependentActivator` children).
+pub fn extract_level_with(name: &str, scene: &Scene, scripts: &ScriptIndex, control_types: &str) -> Level {
     let objects = scene.game_objects();
     let mut colliders = Vec::new();
     for go in &objects {
@@ -660,7 +736,7 @@ pub fn extract_level(name: &str, scene: &Scene, scripts: &ScriptIndex) -> Level 
         .collect();
 
     let sprites = crate::sprites::scene_sprites(scene, scripts);
-    let texts = level_texts(scene, scripts, OFFLINE_CONTROL_TYPES);
+    let texts = level_texts(scene, scripts, control_types);
     let helicopters = crate::vehicles::helicopters(scene, scripts);
     let sounds = crate::audio::scene_sounds(scene, scripts);
     let prepooled = scene
@@ -669,14 +745,353 @@ pub fn extract_level(name: &str, scene: &Scene, scripts: &ScriptIndex) -> Level 
         .filter(|d| d.body.get("m_Script").and_then(Value::guid).and_then(|g| scripts.class_name(g)) == Some("Prepooler"))
         .filter_map(|d| d.body.get("prefab").and_then(Value::guid).map(str::to_owned))
         .collect();
-    Level { name: name.to_owned(), colliders, spawn_points, camera, light, light_setup, ambient, allowed_weapons, enemies, sprites, texts, helicopters, sounds, prepooled, randomize_spawn_points }
+    let enders = level_enders(scene, scripts);
+    let tips = objects.iter().filter(|go| go.active_in_hierarchy()).find_map(|go| mono_fields(go, scripts, "LevelTips")).map(|b| {
+        b.get("tips")
+            .map(Value::as_seq)
+            .unwrap_or(&[])
+            .iter()
+            .map(|t| LevelTip {
+                applicable_control_types: t.get("applicableControlTypes").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_owned)).collect(),
+                message: t.str_of("message").unwrap_or("").to_owned(),
+            })
+            .collect()
+    });
+    let meshes = crate::scenery::scene_meshes(scene, scripts);
+    let scrollers = crate::scenery::scrollers(scene, scripts);
+    let props = crate::scenery::props(scene, scripts, &colliders, &sprites);
+    Level {
+        name: name.to_owned(),
+        colliders,
+        spawn_points,
+        camera,
+        light,
+        light_setup,
+        ambient,
+        allowed_weapons,
+        enemies,
+        sprites,
+        texts,
+        helicopters,
+        sounds,
+        prepooled,
+        randomize_spawn_points,
+        meshes,
+        scrollers,
+        props,
+        enders,
+        tips,
+        versus_ender: versus_ender(scene, scripts),
+    }
+}
+
+/// One `LevelTips.LevelTip`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LevelTip {
+    /// Processor class names that must all be in use for the tip to apply (empty: always).
+    pub applicable_control_types: Vec<String>,
+    pub message: String,
+}
+
+/// What switches a level ender's "Ender" object on.
+#[derive(Clone, Debug, PartialEq)]
+pub enum EnderActivator {
+    /// `ActivateSomethingOnTriggered` with its `TriggeredByAllPlayers` (the `trigger` field, or
+    /// `GetComponentInChildren` at `Start`, which only finds active ones). `None`: no trigger
+    /// was found, so the activator never fires (its `Update` throws every frame in the
+    /// original).
+    AllPlayersTrigger { trigger: Option<FileId> },
+    /// `DestroyAllEnemiesLevelEnder`: every registered enemy exhausted; its `countdownLabel`.
+    DestroyAllEnemies { countdown_label: Option<FileId> },
+    /// `DestroyParticularEnemyLevelEnder`: the root object of the `enemy` health.
+    DestroyParticularEnemy { enemy: Option<FileId> },
+}
+
+/// The "Ender" object a level ender activates and the end-of-level scripts on it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EndOfLevel {
+    pub object: FileId,
+    /// World position of the object (`EventSounds` plays there).
+    pub position: [f32; 3],
+    /// `EndOfLevelUIActivator`.
+    pub ui: bool,
+    /// `EndOfLevelCameraMover.minimumDistance`.
+    pub camera_minimum_distance: Option<f32>,
+    /// `EndOfLevelTimeSlower`.
+    pub time_slower: bool,
+    /// `DisableGameOvering`.
+    pub disable_game_overing: bool,
+    /// `LevelComplete`.
+    pub level_complete: bool,
+    /// `ExplodeSomethingOnStart.toExplode`.
+    pub explode: Option<FileId>,
+    /// `EventSounds` start sound groups (the "Applause").
+    pub start_sounds: Vec<String>,
+    /// `EndOfVersusGameUIActivator` (the Versus Ender's screen instead of "End of Level").
+    pub versus_ui: bool,
+    /// `EndOfVersusGameLoserDestroyer`.
+    pub loser_destroyer: bool,
+}
+
+/// The "Versus Game Ender": `VersusGameEnder` and the object it activates when the frag limit
+/// is reached.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VersusEnder {
+    pub object: FileId,
+    pub ender: Option<EndOfLevel>,
+}
+
+/// The scripts of an "Ender" object.
+fn end_of_level(scene: &Scene, scripts: &ScriptIndex, e: GameObject<'_>) -> EndOfLevel {
+    let has = |n: &str| mono_fields(&e, scripts, n).is_some_and(|b| b.bool_of("m_Enabled").unwrap_or(true));
+    let start_sounds = mono_fields(&e, scripts, "EventSounds")
+        .and_then(|b| b.get("startSound").and_then(|s| s.get("SoundEvents")))
+        .map(Value::as_seq)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|ev| ev.i64_of("currentSoundFunctionType").unwrap_or(0) == 0)
+        .filter_map(|ev| ev.str_of("soundType").filter(|s| !s.is_empty() && *s != "[None]").map(str::to_owned))
+        .collect();
+    EndOfLevel {
+        object: e.id(),
+        position: e.world_affine().t,
+        ui: has("EndOfLevelUIActivator"),
+        camera_minimum_distance: mono_fields(&e, scripts, "EndOfLevelCameraMover").map(|b| b.f32_of("minimumDistance").unwrap_or(14.0)),
+        time_slower: has("EndOfLevelTimeSlower"),
+        disable_game_overing: has("DisableGameOvering"),
+        level_complete: has("LevelComplete"),
+        explode: mono_fields(&e, scripts, "ExplodeSomethingOnStart").and_then(|b| referenced_object(scene, b.get("toExplode"))).map(|t| t.id()),
+        start_sounds,
+        versus_ui: has("EndOfVersusGameUIActivator"),
+        loser_destroyer: has("EndOfVersusGameLoserDestroyer"),
+    }
+}
+
+/// The active, enabled `VersusGameEnder` of the scene and its `toActivate`.
+pub fn versus_ender(scene: &Scene, scripts: &ScriptIndex) -> Option<VersusEnder> {
+    scene.game_objects().into_iter().filter(|go| go.active_in_hierarchy()).find_map(|go| {
+        let b = mono_fields(&go, scripts, "VersusGameEnder").filter(|b| b.bool_of("m_Enabled").unwrap_or(true))?;
+        let ender = referenced_object(scene, b.get("toActivate")).map(|e| end_of_level(scene, scripts, e));
+        Some(VersusEnder { object: go.id(), ender })
+    })
+}
+
+/// The `Explodable` "Marker" (an exclamation mark drawn with `PolygonColliderOutlineLines`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnderMarker {
+    pub object: FileId,
+    /// `activeInHierarchy` when the level loads.
+    pub active: bool,
+    /// World position of the object (its `LinesRenderer` draws relative to it).
+    pub position: [f32; 3],
+    /// The `PolygonCollider2D` paths in world space (each closed).
+    pub outline: Vec<Vec<[f32; 3]>>,
+    /// `PolygonColliderOutlineLines.color` (`Color32`), `lineThickness`, `shadowPlaneZ`.
+    pub color: [u8; 4],
+    pub line_thickness: f32,
+    pub shadow_plane_z: f32,
+    /// `ExplodeSpritesAndLines.fadeWaitTime`.
+    pub fade_wait_time: f32,
+}
+
+/// A "Level Ender": `ActivateSomethingOnTriggered` (+ optionally an enemy-count ender) that
+/// activates "Ender" (`LevelComplete` and friends); `GameOverUIActivator` and
+/// `EndOfLevelEnemyDestroyer` ride on the same object.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LevelEnder {
+    pub object: FileId,
+    pub name: String,
+    pub activators: Vec<EnderActivator>,
+    pub ender: Option<EndOfLevel>,
+    /// `GameOverUIActivator` (enabled).
+    pub game_over_activator: bool,
+    /// `EndOfLevelEnemyDestroyer`.
+    pub enemy_destroyer: bool,
+    pub markers: Vec<EnderMarker>,
+}
+
+/// The root object of a reference (`{fileID}` to a component or a game object).
+fn referenced_object<'a>(scene: &'a Scene, value: Option<&Value>) -> Option<GameObject<'a>> {
+    let id = value?.file_id().filter(|&id| id != 0)?;
+    if let Some(go) = scene.game_object(id) {
+        return Some(go);
+    }
+    let owner = scene.get(id)?.body.get("m_GameObject")?.file_id()?;
+    scene.game_object(owner)
+}
+
+fn root_object(go: GameObject<'_>) -> GameObject<'_> {
+    let mut root = go;
+    while let Some(parent) = root.parent() {
+        root = parent;
+    }
+    root
+}
+
+/// `GetComponentInChildren<T>()`: the object itself, then its children depth first, active
+/// objects only.
+fn find_in_active_children<'a>(go: GameObject<'a>, scripts: &ScriptIndex, class_name: &str) -> Option<GameObject<'a>> {
+    if !go.active_in_hierarchy() {
+        return None;
+    }
+    if mono_fields(&go, scripts, class_name).is_some_and(|b| b.bool_of("m_Enabled").unwrap_or(true)) {
+        return Some(go);
+    }
+    go.children().into_iter().find_map(|c| find_in_active_children(c, scripts, class_name))
+}
+
+/// Every active object with an `ActivateSomethingOnTriggered`, `DestroyAllEnemiesLevelEnder`
+/// or `DestroyParticularEnemyLevelEnder`, with what it switches on.
+pub fn level_enders(scene: &Scene, scripts: &ScriptIndex) -> Vec<LevelEnder> {
+    let mut out = Vec::new();
+    for go in scene.game_objects() {
+        if !go.active_in_hierarchy() {
+            continue;
+        }
+        let mut activators = Vec::new();
+        let mut targets = Vec::new();
+        for c in go.components() {
+            if c.class_id != class::MONO_BEHAVIOUR || !c.body.bool_of("m_Enabled").unwrap_or(true) {
+                continue;
+            }
+            let b = &c.body;
+            let target = referenced_object(scene, b.get("toActivate"));
+            match script_name(c, scripts) {
+                Some("ActivateSomethingOnTriggered") => {
+                    let trigger = referenced_object(scene, b.get("trigger")).or_else(|| find_in_active_children(go, scripts, "TriggeredByAllPlayers"));
+                    activators.push(EnderActivator::AllPlayersTrigger { trigger: trigger.map(|t| t.id()) });
+                }
+                Some("DestroyAllEnemiesLevelEnder") => {
+                    activators.push(EnderActivator::DestroyAllEnemies { countdown_label: referenced_object(scene, b.get("countdownLabel")).map(|t| t.id()) });
+                }
+                Some("DestroyParticularEnemyLevelEnder") => {
+                    let enemy = referenced_object(scene, b.get("enemy")).map(|e| root_object(e).id());
+                    activators.push(EnderActivator::DestroyParticularEnemy { enemy });
+                }
+                _ => continue,
+            }
+            targets.push(target);
+        }
+        if activators.is_empty() {
+            continue;
+        }
+        // TODO(UNCERTAIN): every level's activators share one `toActivate` ("Ender"); a level
+        // whose activators point at different objects would only get the first one's.
+        let ender = targets.into_iter().flatten().next().map(|e| end_of_level(scene, scripts, e));
+        let has = |n: &str| mono_fields(&go, scripts, n).is_some_and(|b| b.bool_of("m_Enabled").unwrap_or(true));
+        let mut markers = Vec::new();
+        let mut stack = go.children();
+        while let Some(child) = stack.pop() {
+            stack.extend(child.children());
+            let Some(lines) = mono_fields(&child, scripts, "PolygonColliderOutlineLines") else { continue };
+            let world = child.world_affine();
+            let outline = child
+                .component(class::POLYGON_COLLIDER_2D)
+                .map(|p| {
+                    let offset = p.body.get("m_Offset").and_then(Value::as_vec2).unwrap_or((0.0, 0.0));
+                    p.body
+                        .get("m_Points")
+                        .and_then(|m| m.get("m_Paths"))
+                        .map(Value::as_seq)
+                        .unwrap_or(&[])
+                        .iter()
+                        .map(|path| path.as_seq().iter().filter_map(Value::as_vec2).map(|(x, y)| world.transform_point([x + offset.0, y + offset.1, 0.0])).collect())
+                        .collect()
+                })
+                .unwrap_or_default();
+            markers.push(EnderMarker {
+                object: child.id(),
+                active: child.active_in_hierarchy(),
+                position: world.t,
+                outline,
+                color: lines.get("color").and_then(|c| c.i64_of("rgba")).map_or([255; 4], |rgba| (rgba as u32).to_le_bytes()),
+                line_thickness: lines.f32_of("lineThickness").unwrap_or(0.1),
+                shadow_plane_z: lines.f32_of("shadowPlaneZ").unwrap_or(0.0),
+                fade_wait_time: mono_fields(&child, scripts, "ExplodeSpritesAndLines").and_then(|b| b.f32_of("fadeWaitTime")).unwrap_or(2.0),
+            });
+        }
+        out.push(LevelEnder {
+            object: go.id(),
+            name: go.name().to_owned(),
+            activators,
+            ender,
+            game_over_activator: has("GameOverUIActivator"),
+            enemy_destroyer: has("EndOfLevelEnemyDestroyer"),
+            markers,
+        });
+    }
+    out
 }
 
 /// Load `Assets/Game/Levels/<folder>/<name>.unity` style paths relative to the exported project
 /// root (the directory that contains `Assets/`).
 pub fn load_level(export_root: &Path, scene_path: &str) -> std::io::Result<Level> {
+    load_level_for(export_root, scene_path, None)
+}
+
+/// What `LevelLoader` knows when the level's `Awake`s run: `PlayerCount` and `Difficulty`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AwakeConditions {
+    pub player_count: usize,
+    pub difficulty: i32,
+}
+
+/// [`load_level`] with the objects that `MinimumPlayers`, `MinimumDifficulty` and
+/// `ActivateOrDestroyAccordingToDifficultyLevel` destroy (or activate) in `Awake` already gone
+/// (or switched on). `None` reads the scene as saved.
+pub fn load_level_for(export_root: &Path, scene_path: &str, conditions: Option<AwakeConditions>) -> std::io::Result<Level> {
+    load_level_with(export_root, scene_path, conditions, OFFLINE_CONTROL_TYPES)
+}
+
+/// [`load_level_for`] with the control types in use (see [`extract_level_with`]).
+pub fn load_level_with(export_root: &Path, scene_path: &str, conditions: Option<AwakeConditions>, control_types: &str) -> std::io::Result<Level> {
     let scripts = ScriptIndex::scan(&export_root.join("Assets/Scripts"));
-    let scene = Scene::load(&export_root.join(scene_path))?;
+    let mut scene = Scene::load(&export_root.join(scene_path))?;
+    if let Some(conditions) = conditions {
+        apply_awake_gates(&mut scene, &scripts, conditions);
+    }
     let name = Path::new(scene_path).file_stem().and_then(|s| s.to_str()).unwrap_or("level");
-    Ok(extract_level(name, &scene, &scripts))
+    Ok(extract_level_with(name, &scene, &scripts, control_types))
+}
+
+/// The `Awake` of every active object's level-set-up gates:
+/// * `MinimumPlayers` (`minimumPlayers`, default 2): destroyed below that player count;
+/// * `MinimumDifficulty` (`minimumDifficultyLevel`, default 0): destroyed below that difficulty;
+/// * `ActivateOrDestroyAccordingToDifficultyLevel`: of `toActivate`, entry `Difficulty + 1` is
+///   switched on and every other one destroyed.
+///
+/// A destroyed object is switched off here, which hides it (and its children) from every reader.
+/// Returns the objects switched off.
+pub fn apply_awake_gates(scene: &mut Scene, scripts: &ScriptIndex, conditions: AwakeConditions) -> Vec<FileId> {
+    let mut off: Vec<FileId> = Vec::new();
+    let mut on: Vec<FileId> = Vec::new();
+    for go in scene.game_objects() {
+        if !go.active_in_hierarchy() {
+            continue;
+        }
+        if let Some(b) = mono_fields(&go, scripts, "MinimumPlayers") {
+            if (conditions.player_count as i64) < b.i64_of("minimumPlayers").unwrap_or(2) {
+                off.push(go.id());
+            }
+        }
+        if let Some(b) = mono_fields(&go, scripts, "MinimumDifficulty") {
+            if i64::from(conditions.difficulty) < b.i64_of("minimumDifficultyLevel").unwrap_or(0) {
+                off.push(go.id());
+            }
+        }
+        if let Some(b) = mono_fields(&go, scripts, "ActivateOrDestroyAccordingToDifficultyLevel") {
+            let chosen = (conditions.difficulty + 1) as usize;
+            for (i, target) in b.get("toActivate").map(Value::as_seq).unwrap_or(&[]).iter().enumerate() {
+                let Some(id) = target.file_id().filter(|&id| id != 0) else { continue };
+                if i == chosen { on.push(id) } else { off.push(id) }
+            }
+        }
+    }
+    for &id in &on {
+        scene.set_active_self(id, true);
+    }
+    for &id in &off {
+        scene.set_active_self(id, false);
+    }
+    off
 }

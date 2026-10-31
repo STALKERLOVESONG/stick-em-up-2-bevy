@@ -89,3 +89,25 @@ fn the_swords_swish_is_not_a_projectile() {
     assert!(unity_data::projectile::try_load_projectile(&assets, &sword.projectile).unwrap().is_none());
     assert!(load_projectile(&assets, &sword.projectile).is_err());
 }
+
+#[test]
+fn the_swords_swish_is_a_melee_effect() {
+    let Some(root) = export_root() else { return };
+    let assets = root.join("Assets");
+    let Ok(rig) = load_man_rig(&assets) else {
+        eprintln!("Man.prefab rig not readable here; skipping");
+        return;
+    };
+    let sword = rig.weapons.iter().find(|w| w.name == "Sword").unwrap();
+    let swish = unity_data::projectile::try_load_melee(&assets, &sword.projectile).unwrap().expect("a melee effect");
+    assert_eq!(swish.name, "Sword Swish");
+    assert_eq!(swish.damage, 40.0);
+    assert_eq!(swish.lifetime, 0.25);
+    assert!(swish.takes_responsibility);
+    // "Deflector" (bouncy, does not make projectiles explode) and "Damager".
+    let deflector = swish.pieces.iter().find(|p| p.deflector).expect("deflector");
+    assert_eq!(deflector.bounciness, 1.0);
+    assert_eq!(deflector.path, vec![[1.5, 1.3], [-1.0, 0.0], [1.5, -1.3]]);
+    let damager = swish.pieces.iter().find(|p| !p.deflector).expect("damager");
+    assert_eq!(damager.path.len(), 4);
+}

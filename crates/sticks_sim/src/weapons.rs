@@ -80,6 +80,14 @@ impl Loadout {
         self.weapons.len() > 1
     }
 
+    /// Development hook (not in the original): hold every rig weapon `0..count`, keeping the one
+    /// that is up.
+    pub fn unlock_all(&mut self, count: usize) {
+        let current = self.current();
+        self.weapons = (0..count).collect();
+        self.index = current.and_then(|c| self.weapons.iter().position(|&w| w == c)).unwrap_or(0);
+    }
+
     /// The rig weapons the loadout holds, in order (`weaponNames`).
     pub fn weapons(&self) -> &[usize] {
         &self.weapons
@@ -143,6 +151,16 @@ pub struct Launch {
 }
 
 impl Launcher {
+    /// `ProjectileLauncher.firingRateTime`.
+    pub fn firing_rate_time(&self) -> f32 {
+        self.firing_rate_time
+    }
+
+    /// Development hook (not in the original): change the time between shots.
+    pub fn set_firing_rate_time(&mut self, t: f32) {
+        self.firing_rate_time = t;
+    }
+
     pub fn new(firing_rate_time: f32, fully_automatic: bool, chargeable: bool) -> Launcher {
         Launcher { firing_rate_time, fully_automatic, chargeable, charge_time: 0.0, next_fire_time: 0.0, waiting_for_release: false }
     }
@@ -293,6 +311,15 @@ fn normalized(v: Vec2) -> Vec2 {
 }
 
 impl Shot {
+    /// Centre of the projectile's circle collider.
+    pub fn collider_center(&self) -> Vec2 {
+        self.position + self.collider_offset
+    }
+
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
     /// `ProjectileLauncher.Update`'s spawn followed by `Projectile.SetTeam`: place the projectile
     /// at `origin`, advance it by the sub-frame offset, aim it along `fire_direction` and put it on
     /// its team's projectile layer. `damage` is the (already difficulty-scaled) hit damage.
@@ -494,7 +521,7 @@ mod tests {
     }
 
     fn open_rules() -> PhysicsRules {
-        PhysicsRules { gravity: Vec2::new(0.0, -16.076), layer_matrix: [u32::MAX; 32], raycasts_hit_triggers: true, box2d: Default::default() }
+        PhysicsRules { gravity: Vec2::new(0.0, -16.076), layer_matrix: [u32::MAX; 32], raycasts_hit_triggers: true, box2d: Default::default(), velocity_iterations: 8, position_iterations: 3 }
     }
 
     fn wall_world(x: f32) -> World {

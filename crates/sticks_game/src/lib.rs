@@ -9,6 +9,9 @@
 
 pub mod audio;
 pub mod vehicles;
+/// Local debug hacks (git-ignored file; `build.rs` sets `debug_hacks` when it exists).
+#[cfg(debug_hacks)]
+mod hacks;
 pub mod camera;
 pub mod config;
 pub mod debug;
@@ -18,15 +21,23 @@ pub mod enemy;
 pub mod figure;
 pub mod helicopter;
 pub mod hud;
+pub mod ingame_ui;
+pub mod input;
 pub mod letters;
 pub mod loading;
 pub mod level;
+pub mod level_end;
 pub mod life;
 pub mod lobby;
 pub mod menu;
+pub mod net;
 pub mod player;
+pub mod save;
+pub mod scenery;
+pub mod settings;
 pub mod state;
 pub mod unity_render;
+pub mod versus;
 pub mod weapon;
 
 use bevy::prelude::*;
@@ -74,9 +85,14 @@ impl Plugin for GamePlugin {
                     .chain()
                     .run_if(in_state(AppState::InGame)),
             )
-            // `Time.timeScale == 0` in the pause menu: only the presentation keeps running.
+            // `Time.timeScale == 0` in a `Pause` menu: only the presentation and the screens keep
+            // running.
             .configure_sets(Update, (FrameSet::Input, FrameSet::FixedSteps, FrameSet::RoleInput, FrameSet::Characters, FrameSet::Camera).run_if(menu::not_paused))
+            // A network game starts once every machine has loaded the level.
+            .configure_sets(Update, (FrameSet::Input, FrameSet::FixedSteps, FrameSet::RoleInput, FrameSet::Characters, FrameSet::Camera).run_if(net::gameplay_ready))
             .add_plugins((level::LevelPlugin, life::LifePlugin, player::PlayerPlugin, camera::CameraPlugin, weapon::WeaponPlugin, enemy::EnemyPlugin, figure::FigurePlugin, menu::MenuPlugin, hud::HudPlugin, letters::LettersPlugin, helicopter::HelicopterPlugin, loading::LoadingPlugin, debug::DebugPlugin, devscript::DevScriptPlugin))
-            .add_plugins((unity_render::UnityRenderPlugin, lobby::LobbyPlugin, effects::EffectsPlugin, audio::GameAudioPlugin, vehicles::VehiclePlugin));
+            .add_plugins((unity_render::UnityRenderPlugin, lobby::LobbyPlugin, effects::EffectsPlugin, audio::GameAudioPlugin, vehicles::VehiclePlugin, ingame_ui::InGameUiPlugin, level_end::LevelEndPlugin, save::SavePlugin, scenery::SceneryPlugin, input::InputPlugin, versus::VersusPlugin, net::NetPlugin, settings::SettingsPlugin));
+        #[cfg(debug_hacks)]
+        app.add_plugins(hacks::HacksPlugin);
     }
 }

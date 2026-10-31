@@ -130,6 +130,13 @@ pub struct Character {
 
     last_safe_position: Vec2,
     last_last_safe_position: Vec2,
+
+    /// `networkTargetPosition`: where the owner last said the character is (characters another
+    /// peer simulates); `None` offline and for the owner.
+    network_target: Option<Vec2>,
+    /// `networkAddedVelocity`: the pull towards the target added last step, taken out again
+    /// before the next.
+    network_added_velocity: Vec2,
 }
 
 impl Character {
@@ -192,7 +199,15 @@ impl Character {
             // on anything twice respawns at the world origin.
             last_safe_position: Vec2::ZERO,
             last_last_safe_position: Vec2::ZERO,
+            network_target: None,
+            network_added_velocity: Vec2::ZERO,
         }
+    }
+
+    /// `CharacterControl2D.OnSerializeNetworkView` on a peer that does not own the character:
+    /// the owner's latest position, which the next fixed steps pull the character towards.
+    pub fn set_network_target(&mut self, position: Vec2) {
+        self.network_target = Some(position);
     }
 
     pub fn position(&self) -> Vec2 {
@@ -227,6 +242,7 @@ impl Character {
     /// rigid body restarts at rest; the script-side `velocity` field is kept as the original
     /// kept it.
     pub fn respawn_at_last_safe_position(&mut self) {
+        self.network_target = None;
         self.body.position = self.last_last_safe_position;
         self.body.velocity = Vec2::ZERO;
         self.animator.restart();
@@ -280,6 +296,7 @@ impl Character {
         self.run_fixed_update(input, world, delta_time, frame_count);
         let mut report = self.body.step(world, rules, delta_time);
         report.entered_triggers = report.triggers.iter().copied().filter(|id| !self.trigger_overlaps.contains(id)).collect();
+        report.exited_triggers = self.trigger_overlaps.iter().copied().filter(|id| !report.triggers.contains(id)).collect();
         self.trigger_overlaps = report.triggers.iter().copied().collect();
         self.digest_step(&report, world, frame_count);
         report
@@ -289,6 +306,10 @@ impl Character {
         let gravity = Vec2::new(0.0, self.jump_cancel_impulse * 2.0);
         if self.body.gravity_scale != 1.0 {
             self.body.gravity_scale = 1.0;
+        }
+        if self.network_target.is_some() {
+            self.velocity -= self.network_added_velocity;
+            self.network_added_velocity = Vec2::ZERO;
         }
         self.grounded = self.frames_since_jump > 1
             && (self.manually_grounded_last_frame || !self.ground_touches.is_empty() || !self.ground_trigger_touches.is_empty());
@@ -336,6 +357,18 @@ impl Character {
             }
         }
 
+        // A character owned elsewhere moves a tenth of the way to the owner's position each step
+        // (by velocity, so it still collides), or jumps there when more than 10 units off.
+        if let Some(target) = self.network_target {
+            let position = self.body.position;
+            if (position - target).sqr_magnitude() <= 100.0 {
+                let blended = position * 0.9 + target * 0.1;
+                self.network_added_velocity = (blended - position) / delta_time;
+                self.velocity += self.network_added_velocity;
+            } else {
+                self.body.position = target;
+            }
+        }
         self.body.velocity = self.velocity;
         self.ground_touches.clear();
         if let Some(&first) = self.ground_trigger_touches.iter().next() {
@@ -464,6 +497,11 @@ impl Character {
             let world_x = if self.facing_right { local_delta[2] } else { -local_delta[2] };
             let delta = Vec2::new(world_x, local_delta[1]);
             self.velocity = delta * ROOT_MOTION_SCALE / delta_time;
+            // Not in the original: the root motion replaced the velocity, so last step's network
+            // pull is no longer in it. The original still subtracted it in the next `FixedUpdate`,
+            // which stalls a standing remote character at 1/11 of the way to its owner's
+            // position; leaving it out lets the pull converge as intended.
+            self.network_added_velocity = Vec2::ZERO;
             self.velocity.x = self.velocity.x.abs() * self.last_movement_direction;
         }
         if ducking {
@@ -517,7 +555,7 @@ mod tests {
     }
 
     fn rules() -> PhysicsRules {
-        PhysicsRules { gravity: Vec2::new(0.0, G), layer_matrix: [u32::MAX; 32], raycasts_hit_triggers: true, box2d: Default::default() }
+        PhysicsRules { gravity: Vec2::new(0.0, G), layer_matrix: [u32::MAX; 32], raycasts_hit_triggers: true, box2d: Default::default(), velocity_iterations: 8, position_iterations: 3 }
     }
 
     fn collider(id: u32, layer: u8) -> StaticCollider {
@@ -573,6 +611,23 @@ mod tests {
         assert!((s.ch.position().y + 0.005).abs() < 0.01, "y = {}", s.ch.position().y);
         assert!(s.ch.body.velocity.magnitude() < 0.05, "v = {:?}", s.ch.body.velocity);
         assert_eq!(s.ch.position().x, 0.0);
+    }
+
+    #[test]
+    fn a_character_owned_elsewhere_follows_the_owners_position() {
+        let Some(mut s) = Sim::new(flat(), Vec2::new(0.0, 0.0)) else { return };
+        s.run(60, CharacterInput::default());
+        // Close: pulled a tenth of the way each step, so it converges without teleporting.
+        s.ch.set_network_target(Vec2::new(2.0, 0.0));
+        s.run(1, CharacterInput::default());
+        let after_one = s.ch.position().x;
+        assert!(after_one > 0.05 && after_one < 0.5, "x = {after_one}");
+        s.run(120, CharacterInput::default());
+        assert!((s.ch.position().x - 2.0).abs() < 0.05, "x = {}", s.ch.position().x);
+        // Far: it jumps there.
+        s.ch.set_network_target(Vec2::new(40.0, 0.0));
+        s.run(1, CharacterInput::default());
+        assert!((s.ch.position().x - 40.0).abs() < 0.5, "x = {}", s.ch.position().x);
     }
 
     #[test]

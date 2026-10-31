@@ -8,8 +8,10 @@
 //! keeps the slot, the pilot's input, the single-player gun, the camera influencer and the
 //! engine state the boarding systems and the audio read.
 //!
-//! Not yet (see the handoff's helicopter plan): contacts with the level and other bodies (the
-//! Box2D contact solver port), the seated occupants (H5: the pilot and passenger figures are not
+//! H7: hulls collide with the level and each other through `sticks_sim::contact` (Box2D's
+//! contact solver) and push characters as moving obstacles.
+//!
+//! Not yet (see the handoff's helicopter plan): the seated occupants (H5: the pilot and passenger figures are not
 //! drawn), the explosion (H4) and with it the player helicopter's respawn
 //! (`RespawnerInstantiator`, `RespawnAtStartPosition`), which waits for `ExplosionFinished`.
 //! TODO(UNCERTAIN): `HelicopterInput` and the AI behaviours share execution order 0; the input is
@@ -25,7 +27,8 @@ use sticks_sim::ai::{Candidate, OffScreenSleep, Targeter};
 use sticks_sim::draw::{BACK, Geometry, color32, scene_sprite_geometry, shadow_offset_and_scale, sprite_shadow_geometry};
 use sticks_sim::helicopter::{HelicopterControl, back_rotor_blades, gun_angle_degrees, move_to_first_target_height, top_rotor_blades};
 use sticks_sim::life::Health;
-use sticks_sim::physics::{BodyShape, triangulate};
+use sticks_sim::contact::{DynamicBody, Polygon, WarmStart, mass_properties};
+use sticks_sim::physics::{BodyShape, StaticCollider, merge_convex, triangulate};
 use sticks_sim::rigid_body::RigidBody;
 use sticks_sim::visual::{LINE_TRIANGLES, StickLine, line_vertices};
 use sticks_sim::vehicles::{ControlSlot, ExitLatch, OCCUPIED_ENGINE_VOLUME, UNOCCUPIED_ENGINE_VOLUME, helicopter_engine_pitch, team_vehicles_layer};
@@ -77,7 +80,7 @@ pub struct Helicopter {
     control: HelicopterControl,
     /// `HelicopterInput` (copied from the processor) and the processor itself
     /// (`EnemyHelicopterInput`): movement, fire, absolute aim.
-    pub(crate) input: (SimVec2, bool, Option<SimVec2>),
+    pub(crate) input: (SimVec2, bool, Option<HeliAim>),
     processor: (SimVec2, bool, Option<SimVec2>),
     /// Somebody (or the AI) controls it (`HelicopterControl.Input != null`).
     controlled: bool,
@@ -89,6 +92,9 @@ pub struct Helicopter {
     pub(crate) exit: bool,
     /// The team of the player flying it (`Player.TeamIndex`).
     pilot_team: u8,
+    /// `IsPilotAlsoAGunner` when the pilot took control (one active player): the single-player
+    /// gun gets the pilot's input.
+    pilot_is_gunner: bool,
     /// `FixWorldOffsetFromTransform` on the "Camera Influencer": its world offset from the root
     /// (taken in `Awake`) and its position (moved in `FixedUpdate`).
     camera_offset: Option<SimVec2>,
@@ -106,6 +112,8 @@ pub struct Helicopter {
     asleep: Option<SimVec2>,
     /// Collider pieces (counter-clockwise triangles) in the root's local space.
     hull: Vec<Vec<SimVec2>>,
+    /// The hull as Box2D polygons in body space (for the contact solver).
+    pieces: Vec<Polygon>,
     /// The hull as projectiles see it (rotated to the body's angle, relative to its position).
     pub shape: BodyShape,
     pub layer: u8,
@@ -185,6 +193,23 @@ impl Helicopter {
         self.asleep.is_none() && self.alive()
     }
 
+    /// Development hook (not in the original): full health again.
+    pub(crate) fn refill_health(&mut self) {
+        if self.alive() {
+            let _ = self.health.reset();
+        }
+    }
+
+    /// `Health.startingHealth` (difficulty-modified).
+    pub fn starting_health(&self) -> f32 {
+        self.health.starting()
+    }
+
+    /// An enemy helicopter (`EnemyHelicopterInput`).
+    pub fn is_enemy(&self) -> bool {
+        self.spec.enemy.is_some()
+    }
+
     /// Health left over starting health (`Health.Normalized`, what the pilot's HUD bar shows).
     pub fn health_normalized(&self) -> f32 {
         self.health.normalized()
@@ -203,9 +228,11 @@ impl Helicopter {
     }
 
     /// `SetController` (the player's `Player.SetUp` puts the tree on the team's vehicle layer).
-    pub(crate) fn take_control(&mut self, player: Entity, team: u8) {
+    pub(crate) fn take_control(&mut self, player: Entity, team: u8, active_players: usize) {
         let Some(slot) = self.slot.as_mut() else { return };
         slot.set_controller(player);
+        // `if (IsPilotAlsoAGunner()) singlePlayerGunnerControl.ProjectileLauncherInput = ...`.
+        self.pilot_is_gunner = active_players == 1;
         self.exit_latch.on_set_controller();
         self.controlled = true;
         self.pilot_team = team;
@@ -232,10 +259,12 @@ impl Helicopter {
     /// Whether gun `g`'s `ProjectileLauncher` has an input: enemies' `EnemyHelicopterInput` gives
     /// every gunner control its input; a player's helicopter only gives the pilot's input to
     /// `singlePlayerGunnerControl`, and only when the pilot is also a gunner
-    /// (`IsPilotAlsoAGunner`: one active player, which is always the case here). The other
-    /// guns' own `ControlSlot`s are gunner seats for further local players.
+    /// (`IsPilotAlsoAGunner`: one active player when control was taken). The other guns' own
+    /// `ControlSlot`s are gunner seats for further local players.
+    /// TODO: the gunner seats (`HelicopterGunnerControl` with `KeyboardAndMouseHelicopterGunnerInput`)
+    /// are not boardable, so with several players a player helicopter's guns stay silent.
     fn gun_has_input(&self, g: usize) -> bool {
-        if self.spec.enemy.is_some() { self.controlled } else { self.pilot().is_some() && self.spec.single_player_gun == Some(g) }
+        if self.spec.enemy.is_some() { self.controlled } else { self.pilot().is_some() && self.pilot_is_gunner && self.spec.single_player_gun == Some(g) }
     }
 
     /// `CameraPositionInfluencer` on the "Camera Influencer", enabled while the root slot has a
@@ -260,6 +289,74 @@ impl Helicopter {
     pub fn engine(&self) -> Option<(&LoopingSound, SimVec3, f32, f32)> {
         let sound = self.spec.engine_sound.as_ref()?;
         self.is_active_object().then(|| (sound, self.slot_position(), self.engine_volume, helicopter_engine_pitch(self.control.movement_control)))
+    }
+
+    /// `Health.Remaining`.
+    pub fn health_remaining(&self) -> f32 {
+        self.health.remaining()
+    }
+
+    /// The owner's streams: `HelicopterInput.OnSerializeNetworkView` and the hull's
+    /// `SynchronizeRigidBody2D`.
+    pub(crate) fn net_state(&self, id: sticks_net::NetId) -> sticks_net::HelicopterState {
+        sticks_net::HelicopterState {
+            id,
+            movement: [self.input.0.x, self.input.0.y],
+            fire: self.input.1,
+            aim: self.input.2.map(|a| match a {
+                HeliAim::Absolute(p) => sticks_net::WireAim::Absolute([p.x, p.y]),
+                HeliAim::Relative(d) => sticks_net::WireAim::Relative([d.x, d.y]),
+            }),
+            exit: self.exit,
+            position: [self.body.position.x, self.body.position.y],
+            velocity: [self.body.linear_velocity.x, self.body.linear_velocity.y],
+            rotation: self.body.angle,
+            angular_velocity: self.body.angular_velocity,
+            active: self.asleep.is_none(),
+        }
+    }
+
+    /// The owner's input (every frame).
+    pub(crate) fn apply_net_input(&mut self, s: &sticks_net::HelicopterState, exit: bool) {
+        let aim = s.aim.map(|a| match a {
+            sticks_net::WireAim::Absolute(p) => HeliAim::Absolute(SimVec2::new(p[0], p[1])),
+            sticks_net::WireAim::Relative(d) => HeliAim::Relative(SimVec2::new(d[0], d[1])),
+        });
+        self.input = (SimVec2::new(s.movement[0], s.movement[1]), s.fire, aim);
+        if self.pilot().is_some() {
+            self.exit = exit;
+        }
+    }
+
+    /// The owner's hull: `SynchronizeRigidBody2D` takes the owner's velocities and moves the body
+    /// towards the owner's position (jumping there when more than 10 units, or 45°, off).
+    /// TODO(UNCERTAIN): the original also extrapolates by the message's age and smooths only the
+    /// visuals; a tenth of the way per update is used here, as for characters.
+    pub(crate) fn apply_net_body(&mut self, s: &sticks_net::HelicopterState) {
+        let target = SimVec2::new(s.position[0], s.position[1]);
+        let off = target - self.body.position;
+        self.body.position = if off.sqr_magnitude() < 100.0 { self.body.position + off * 0.1 } else { target };
+        let turn = unity_compat::mathf::delta_angle(self.body.angle.to_degrees(), s.rotation.to_degrees());
+        self.body.angle = if turn.abs() < 45.0 { self.body.angle + turn.to_radians() * 0.1 } else { s.rotation };
+        self.body.linear_velocity = SimVec2::new(s.velocity[0], s.velocity[1]);
+        self.body.angular_velocity = s.angular_velocity;
+        self.asleep = if s.active { None } else { Some(target) };
+    }
+
+    /// `SyncServerDamageToClients.ChangedRemotely` for the hull's `Health`.
+    pub(crate) fn receive_health(&mut self, remaining: f32) {
+        let current = self.health.remaining();
+        if remaining < current {
+            let was_alive = self.alive();
+            self.health.damage(current - remaining);
+            if self.alive() {
+                self.flash = 0.1;
+            } else if was_alive {
+                info!("{} destroyed", self.spec.name);
+            }
+        } else if remaining == self.health.starting() {
+            self.health.reset();
+        }
     }
 
     /// The root transform, for explosion parts pinned to the helicopter.
@@ -289,9 +386,10 @@ impl Plugin for HelicopterPlugin {
                 Update,
                 (
                     copy_helicopter_input.in_set(crate::FrameSet::RoleInput),
+                    publish_hulls.in_set(crate::FrameSet::Input),
                     fly_helicopters.in_set(crate::FrameSet::FixedSteps).before(crate::weapon::step_projectiles),
                     hit_helicopters.in_set(crate::FrameSet::FixedSteps).after(crate::weapon::step_projectiles),
-                    (sleep_helicopters, think_helicopters, fire_helicopter_guns).chain().in_set(crate::FrameSet::Characters),
+                    (sleep_helicopters.run_if(crate::net::decides), think_helicopters, fire_helicopter_guns).chain().in_set(crate::FrameSet::Characters),
                 ),
             )
             .add_systems(Update, queue_helicopters.in_set(QueueSet::Collect).run_if(in_state(AppState::InGame)));
@@ -400,11 +498,15 @@ fn spawn_helicopters(
                 active: in_hierarchy(g.node),
             })
             .collect();
-        let hull = spec
+        let hull: Vec<Vec<SimVec2>> = spec
             .collider
             .iter()
-            .flat_map(|path| triangulate(&path.iter().map(|p| SimVec2::new(p[0], p[1])).collect::<Vec<_>>()))
+            .flat_map(|path| merge_convex(triangulate(&path.iter().map(|p| SimVec2::new(p[0], p[1])).collect::<Vec<_>>())))
             .collect();
+        // Unity decomposes the `PolygonCollider2D` into convex Box2D polygons in body space
+        // (the root's scale applied).
+        let root_scale = spec.world.lossy_scale();
+        let pieces: Vec<Polygon> = hull.iter().map(|piece| Polygon::ccw(piece.iter().map(|p| SimVec2::new(p.x * root_scale[0], p.y * root_scale[1])).collect())).collect();
         let starting_health = spec.enemy.as_ref().and_then(|e| e.settings.health_scaling.as_ref()).or(spec.health_scaling.as_ref()).map_or(spec.starting_health, |s| {
             if session.mode == GameMode::Campaign {
                 difficulty_modified(spec.starting_health, &s.amount, s.affected_by_player_count, session.player_count as i32, session.difficulty)
@@ -419,9 +521,16 @@ fn spawn_helicopters(
             m[1][0].atan2(m[0][0]).to_degrees()
         };
         let mut body = RigidBody::new(SimVec2::new(spec.world.t[0], spec.world.t[1]), rotation_z, spec.body.mass, spec.body.linear_drag, spec.body.angular_drag, spec.body.gravity_scale);
-        // TODO(UNCERTAIN): the hull's mass properties (inertia, centre of mass) are not computed
-        // yet; no contacts apply torque until the contact solver exists.
-        body.inertia = 0.0;
+        // `Rigidbody2D.mass` is set explicitly: Box2D's mass data from the hull, scaled to it
+        // (centre of mass and rotational inertia). `RigidbodyConstraints2D.FreezeRotation` (4)
+        // and kinematic bodies take no rotation (or motion) from contacts.
+        let (local_center, inertia) = mass_properties(&pieces, spec.body.mass);
+        body.local_center = local_center;
+        body.inertia = inertia;
+        body.inv_inertia = if inertia > 0.0 && spec.body.constraints & 4 == 0 && !spec.body.kinematic { 1.0 / inertia } else { 0.0 };
+        if spec.body.kinematic {
+            body.inv_mass = 0.0;
+        }
         let enemy = spec.enemy.is_some();
         // `FixWorldOffsetFromTransform.Awake`: the offset is taken in world space once.
         let camera_offset = spec.camera_influencer.map(|i| {
@@ -441,6 +550,7 @@ fn spawn_helicopters(
             exit_latch: ExitLatch::default(),
             exit: false,
             pilot_team: 0,
+            pilot_is_gunner: false,
             camera_point: camera_offset.map_or(SimVec2::ZERO, |o| SimVec2::new(spec.world.t[0] + o.x, spec.world.t[1] + o.y)),
             camera_offset,
             engine_volume: UNOCCUPIED_ENGINE_VOLUME,
@@ -457,6 +567,7 @@ fn spawn_helicopters(
             }),
             asleep: None,
             hull,
+            pieces,
             shape: BodyShape::default(),
             // `SetEnemyLayer` puts an enemy helicopter's whole tree on layer 9.
             layer: if enemy { (8 + ENEMY_TEAM) as u8 } else { spec.layer },
@@ -473,40 +584,86 @@ fn spawn_helicopters(
 }
 
 /// `HelicopterInput.OwnerOnlyUpdate`: copy the processor (enemies' `EnemyHelicopterInput`).
-fn copy_helicopter_input(mut helicopters: Query<&mut Helicopter>) {
+pub(crate) fn copy_helicopter_input(mut helicopters: Query<&mut Helicopter>) {
     for mut h in &mut helicopters {
         if h.asleep.is_none() && h.spec.enemy.is_some() {
-            h.input = h.processor;
+            h.input = (h.processor.0, h.processor.1, h.processor.2.map(HeliAim::Absolute));
         }
     }
 }
 
-/// `HelicopterControl.FixedUpdate` and the physics step, for every fixed step of the frame.
-/// TODO: the Box2D contact solver (hull vs level and other bodies).
-fn fly_helicopters(clock: Res<FrameClock>, collision: Res<Collision>, mut helicopters: Query<&mut Helicopter>) {
-    for mut h in &mut helicopters {
-        if h.asleep.is_some() || !h.alive() {
-            continue;
+/// Ids of helicopter hulls in the collision world's moving colliders (clear of the level's
+/// collider indices and of the letters' ids).
+const HULL_COLLIDER_BASE: u32 = 1 << 25;
+
+/// `HelicopterControl.FixedUpdate` and the physics step, for every fixed step of the frame: all
+/// active helicopters step together (Box2D's island), colliding with the level's solid
+/// colliders and with each other on the layers the collision matrix pairs (`crate::contact`).
+fn fly_helicopters(clock: Res<FrameClock>, collision: Res<Collision>, mut helicopters: Query<(Entity, &mut Helicopter)>, mut warm: Local<WarmStart>) {
+    let rules = &collision.rules;
+    for &dt in &clock.steps {
+        let mut active: Vec<(Entity, Mut<Helicopter>)> = helicopters.iter_mut().filter(|(_, h)| h.asleep.is_none() && h.alive()).collect();
+        if active.is_empty() {
+            return;
         }
-        for &dt in &clock.steps {
+        for (_, h) in active.iter_mut() {
             let input = if h.controlled { Some(h.input.0) } else { None };
-            let h = &mut *h;
+            let h = &mut **h;
             // `FixWorldOffsetFromTransform.FixedUpdate` runs before the physics step.
             if let Some(offset) = h.camera_offset {
                 h.camera_point = h.body.position + offset;
             }
             h.control.fixed_update(&mut h.body, input, dt);
-            h.body.step(dt, collision.rules.gravity, &collision.rules.box2d);
         }
+        let mut bodies: Vec<DynamicBody> = active.iter().map(|(e, h)| DynamicBody { key: e.to_bits(), body: h.body, pieces: h.pieces.clone(), layer: h.layer }).collect();
+        sticks_sim::contact::step(&mut bodies, &collision.world, rules, dt, rules.velocity_iterations, rules.position_iterations, &mut warm);
+        for ((_, h), b) in active.iter_mut().zip(bodies) {
+            h.body = b.body;
+        }
+    }
+    for (_, mut h) in &mut helicopters {
         h.rebuild_shape();
     }
 }
 
+/// The helicopters' hulls as obstacles for the characters' bodies (Box2D collides them with
+/// the characters' rigid bodies; the characters here use their own controller physics).
+/// Published at the start of the frame, so characters meet each hull where the previous frame
+/// left it.
+/// TODO(UNCERTAIN): the characters push nothing back (their mass against the helicopter's is
+/// ignored), and a hull is not interleaved step by step with the characters' fixed steps.
+fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopter>) {
+    let items = helicopters
+        .iter()
+        .filter(|h| h.is_active_object())
+        .enumerate()
+        .map(|(i, h)| {
+            let collider = StaticCollider { id: HULL_COLLIDER_BASE + i as u32, layer: h.layer, ..Default::default() };
+            let pieces = h.shape.polygons.iter().map(|piece| piece.iter().map(|p| *p + h.body.position).collect()).collect();
+            (collider, pieces)
+        })
+        .collect();
+    collision.world.set_moving(items);
+}
+
 /// `Health.Damage` from projectiles; `HelicopterColor` flashes the fuselage.
 /// TODO: the explosion (`ExplodeSpritesAndLines`, occupants) when the health runs out.
-fn hit_helicopters(mut hits: MessageReader<HelicopterHit>, mut helicopters: Query<&mut Helicopter>) {
+fn hit_helicopters(mut hits: MessageReader<HelicopterHit>, mut helicopters: Query<(&mut Helicopter, Option<&crate::net::NetObject>)>, mut net: ResMut<crate::net::Net>) {
+    // In a network game only the host's hits count; the others take the host's health.
+    if net.is_client() {
+        hits.clear();
+        let updates = std::mem::take(&mut net.helicopter_health);
+        for (id, remaining) in updates {
+            for (mut h, object) in &mut helicopters {
+                if object.is_some_and(|o| o.id == id) {
+                    h.receive_health(remaining);
+                }
+            }
+        }
+        return;
+    }
     for hit in hits.read() {
-        let Ok(mut h) = helicopters.get_mut(hit.helicopter) else { continue };
+        let Ok((mut h, _)) = helicopters.get_mut(hit.helicopter) else { continue };
         if !h.alive() {
             continue;
         }
@@ -596,9 +753,27 @@ pub(crate) fn think_helicopters(collision: Res<Collision>, players: Query<(&Avat
                     }
                     let node = h.spec.guns[g].node;
                     let p = h.node_world(node, &root).t;
-                    h.guns[g].angle = gun_angle_degrees(SimVec2::new(aim.x - p[0], aim.y - p[1]));
+                    h.guns[g].angle = gun_angle_degrees(aim.relative_to(p));
                 }
             }
+        }
+    }
+}
+
+/// `HelicopterInput`'s aim: the keyboard and mouse give a point (`AbsoluteAim`), a gamepad a
+/// direction (`RelativeAim`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum HeliAim {
+    Absolute(SimVec2),
+    Relative(SimVec2),
+}
+
+impl HeliAim {
+    /// `CharacterInput.RelativeAim(relativeAim, absoluteAim, origin)`.
+    pub(crate) fn relative_to(self, origin: [f32; 3]) -> SimVec2 {
+        match self {
+            HeliAim::Absolute(p) => SimVec2::new(p.x - origin[0], p.y - origin[1]),
+            HeliAim::Relative(d) => d,
         }
     }
 }
@@ -633,7 +808,7 @@ fn fire_helicopter_guns(
             let pivot = h.node_world(spec_gun.node, &root).t;
             let muzzle = h.node_world(spec_gun.launch_point, &root).t;
             let Some(aim) = aim else { continue };
-            let direction = SimVec2::new(aim.x - pivot[0], aim.y - pivot[1]);
+            let direction = aim.relative_to(pivot);
             let damage = match &spec.damage_scaling {
                 Some(s) if session.mode == GameMode::Campaign => difficulty_modified(spec.damage, &s.amount, s.affected_by_player_count, session.player_count as i32, session.difficulty),
                 _ => spec.damage,

@@ -82,9 +82,13 @@ struct MusicTrack {
     rate: f32,
 }
 
-/// The music cue of the Lobby scene (read once).
+/// The music cue of the Lobby scene (read once), and whether it was started since the Lobby
+/// was entered.
 #[derive(Resource, Default)]
-struct LobbyMusic(Option<Option<MusicCue>>);
+struct LobbyMusic {
+    cue: Option<Option<MusicCue>>,
+    started: bool,
+}
 
 pub struct GameAudioPlugin;
 
@@ -92,7 +96,10 @@ impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LobbyMusic>()
             .add_systems(Startup, load_audio)
-            .add_systems(OnEnter(AppState::Lobby), lobby_music)
+            // The first `OnEnter(Lobby)` runs before `Startup` has loaded MasterAudio, so the
+            // cue is started from `Update` once the set-up exists.
+            .add_systems(OnEnter(AppState::Lobby), |mut music: ResMut<LobbyMusic>| music.started = false)
+            .add_systems(Update, lobby_music.run_if(in_state(AppState::Lobby)))
             .add_systems(OnEnter(AppState::InGame), level_music)
             .add_systems(Update, (lobby_sounds.run_if(in_state(AppState::Lobby)), play_sounds, fade_out_owned, update_voices, update_music, vehicle_engines).chain());
     }
@@ -153,7 +160,7 @@ fn play_sounds(
         if let Some(old) = play.replaces {
             for (entity, v) in &voices {
                 if v.instance == old {
-                    commands.entity(entity).despawn();
+                    commands.entity(entity).try_despawn();
                 }
             }
         }
@@ -203,8 +210,11 @@ fn update_voices(
     real: Res<Time<Real>>,
     cameras: Query<&Rig, With<LevelCamera>>,
     mut voices: Query<(&mut VoiceInstance, Option<&mut AudioSink>)>,
+    memory: Res<crate::lobby::LobbyMemory>,
 ) {
     let Some(audio) = audio else { return };
+    // The settings page's sound volume (not in the original).
+    let sound = memory.settings.sound_volume;
     let now = real.elapsed_secs();
     let ear = listener(&cameras);
     for (mut v, sink) in &mut voices {
@@ -222,7 +232,7 @@ fn update_voices(
             (Some(at), Some(ear)) => distance_gain(at, ear, voice.min_distance, voice.max_distance, voice.rolloff, blend),
             _ => 1.0,
         };
-        let gain = v.volume * audio.spec.mixer_gain(group) * distance;
+        let gain = v.volume * audio.spec.mixer_gain(group) * distance * sound;
         sink.set_volume(Volume::Linear(gain.max(0.0)));
     }
 }
@@ -267,9 +277,13 @@ fn lobby_music(
     mut cache: ResMut<LobbyMusic>,
     mut tracks: Query<(Entity, &mut MusicTrack)>,
 ) {
+    if cache.started {
+        return;
+    }
     let Some(mut audio) = audio else { return };
+    cache.started = true;
     let cue = cache
-        .0
+        .cue
         .get_or_insert_with(|| {
             let assets_dir = config.assets_dir();
             let scripts = unity_data::scripts::ScriptIndex::scan(&assets_dir.join("Scripts"));
@@ -290,7 +304,9 @@ fn level_music(mut commands: Commands, level: Res<ActiveLevel>, audio: Option<Re
 }
 
 /// The playlist cross-fade.
-fn update_music(mut commands: Commands, time: Res<Time<Real>>, mut tracks: Query<(Entity, &mut MusicTrack, Option<&mut AudioSink>)>) {
+fn update_music(mut commands: Commands, time: Res<Time<Real>>, mut tracks: Query<(Entity, &mut MusicTrack, Option<&mut AudioSink>)>, memory: Res<crate::lobby::LobbyMemory>) {
+    // The settings page's music volume (not in the original).
+    let music = memory.settings.music_volume;
     let dt = time.delta_secs();
     for (entity, mut t, sink) in &mut tracks {
         if t.level != t.target {
@@ -298,11 +314,11 @@ fn update_music(mut commands: Commands, time: Res<Time<Real>>, mut tracks: Query
             t.level = if t.level < t.target { (t.level + step).min(t.target) } else { (t.level - step).max(t.target) };
         }
         if t.level <= 0.0 && t.target <= 0.0 {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
             continue;
         }
         if let Some(mut sink) = sink {
-            sink.set_volume(Volume::Linear(t.full * t.level));
+            sink.set_volume(Volume::Linear(t.full * t.level * music));
         }
     }
 }
@@ -318,21 +334,23 @@ fn vehicle_engines(
     cameras: Query<&Rig, With<LevelCamera>>,
     helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
     mut voices: Query<(Entity, &EngineVoice, Option<&mut AudioSink>)>,
+    memory: Res<crate::lobby::LobbyMemory>,
 ) {
     let Some(mut audio) = audio else { return };
+    let sound_volume = memory.settings.sound_volume;
     let ear = listener(&cameras);
     let mut sounding = Vec::new();
     for (entity, voice, sink) in &mut voices {
         let engine = helicopters.get(voice.vehicle).ok().and_then(|(_, h)| h.engine());
         let Some((sound, at, volume, pitch)) = engine else {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
             continue;
         };
         sounding.push(voice.vehicle);
         let Some(mut sink) = sink else { continue };
         let mixer = sound.mixer_group.map_or(1.0, |id| audio.spec.mixer.gain_of_id(id));
         let distance = ear.map_or(1.0, |ear| distance_gain(at, ear, sound.min_distance, sound.max_distance, sound.rolloff, sound.spatial_blend));
-        sink.set_volume(Volume::Linear((volume * mixer * distance).max(0.0)));
+        sink.set_volume(Volume::Linear((volume * mixer * distance * sound_volume).max(0.0)));
         sink.set_speed(pitch);
     }
     for (vehicle, h) in &helicopters {

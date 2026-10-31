@@ -16,6 +16,7 @@ pub mod math;
 pub mod projectile;
 pub mod rig;
 pub mod scene;
+pub mod scenery;
 pub mod scripts;
 pub mod settings;
 pub mod sprites;

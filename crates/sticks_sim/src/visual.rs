@@ -30,7 +30,7 @@ impl CharacterPalette {
 }
 
 /// `Color` → `Color32`: each channel clamped to 0..1, scaled by 255 and truncated.
-pub(crate) fn to_color32(c: [f32; 4]) -> [u8; 4] {
+pub fn to_color32(c: [f32; 4]) -> [u8; 4] {
     c.map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8)
 }
 
@@ -257,6 +257,58 @@ impl CharacterRigModel {
 /// vertices — start cap, body, end cap.
 pub const LINE_TRIANGLES: [u32; 18] = [0, 3, 1, 3, 0, 2, 2, 5, 3, 5, 2, 4, 4, 7, 5, 7, 4, 6];
 
+/// `PolygonColliderOutlineLines.Update`: every edge of every closed path (world space) as a
+/// `LinesRenderer.AddLineWithShadow` line of the renderer at `renderer` (the object's
+/// position): the shadow is offset and widened by `SpriteShadowPositioner.GetShadowOffsetAndScale`
+/// from the renderer's position, 0.003 behind, black with the line's alpha.
+pub fn outline_visual(paths: &[Vec<[f32; 3]>], renderer: Vec3, width: f32, color: [u8; 4], shadow_plane_z: f32, light: Option<Vec3>) -> CharacterVisual {
+    let (delta, scale) = match light {
+        Some(light) => shadow_offset_and_scale(light, renderer, shadow_plane_z),
+        None => ([0.0, 0.0], 1.0),
+    };
+    let mut visual = CharacterVisual::default();
+    for path in paths {
+        let n = path.len();
+        for j in 0..n {
+            let (p, q) = (path[j], path[(j + 1) % n]);
+            let (a, b) = (Vec3::new(p[0], p[1], p[2]), Vec3::new(q[0], q[1], q[2]));
+            visual.lines.push(StickLine { a, b, width, color, shadow_plane_z });
+            visual.shadows.push(StickLine {
+                a: Vec3::new(a.x + delta[0], a.y + delta[1], a.z + SHADOW_Z_OFFSET),
+                b: Vec3::new(b.x + delta[0], b.y + delta[1], b.z + SHADOW_Z_OFFSET),
+                width: width * scale,
+                color: [0, 0, 0, color[3]],
+                shadow_plane_z,
+            });
+        }
+    }
+    visual
+}
+
+/// `LinesRenderer.AddLineWithShadow` for lines given relative to the renderer (whose mesh sits
+/// at the renderer's world position, unrotated): each line plus its black shadow copy, offset
+/// and widened from the renderer's position towards `shadow_plane_z`, 0.003 behind.
+pub fn lines_with_shadows(lines: &[([f32; 3], [f32; 3], f32, [u8; 4])], renderer: Vec3, shadow_plane_z: f32, light: Option<Vec3>) -> CharacterVisual {
+    let (delta, scale) = match light {
+        Some(light) => shadow_offset_and_scale(light, renderer, shadow_plane_z),
+        None => ([0.0, 0.0], 1.0),
+    };
+    let mut visual = CharacterVisual::default();
+    for &(p, q, width, color) in lines {
+        let a = Vec3::new(renderer.x + p[0], renderer.y + p[1], renderer.z + p[2]);
+        let b = Vec3::new(renderer.x + q[0], renderer.y + q[1], renderer.z + q[2]);
+        visual.lines.push(StickLine { a, b, width, color, shadow_plane_z });
+        visual.shadows.push(StickLine {
+            a: Vec3::new(a.x + delta[0], a.y + delta[1], a.z + SHADOW_Z_OFFSET),
+            b: Vec3::new(b.x + delta[0], b.y + delta[1], b.z + SHADOW_Z_OFFSET),
+            width: width * scale,
+            color: [0, 0, 0, color[3]],
+            shadow_plane_z,
+        });
+    }
+    visual
+}
+
 /// `LinesRenderer.uvPrototype`: where each of the 8 vertices samples the `Line` sprite, as
 /// fractions of its UV rectangle. The left third is the start cap, the right third the end cap.
 const LINE_UV_FRACTIONS: [[f32; 2]; 8] =
@@ -350,6 +402,13 @@ pub struct VisualArt {
 }
 
 impl VisualArt {
+    /// Art for some sprites of a collection without lines (a level prop's exploding sprites).
+    pub fn sprites_only<'a>(collection: &unity_data::sprites::SpriteCollection, names: impl IntoIterator<Item = &'a str>) -> VisualArt {
+        let mut art = VisualArt { line_uvs: [[0.0; 2]; 8], sprites: Vec::new() };
+        art.add_sprites(collection, names);
+        art
+    }
+
     /// Collect the art for the sprites a rig uses from the sprite collection that holds `Line`.
     pub fn new(collection: &unity_data::sprites::SpriteCollection, rig: &Rig) -> Option<VisualArt> {
         let line_uvs = line_uv_prototype(&collection.sprite("Line")?.uvs)?;

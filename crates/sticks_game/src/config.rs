@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bevy::prelude::*;
 
@@ -25,8 +25,7 @@ impl GameConfig {
     /// If no export directory can be found; the game cannot run without its data.
     pub fn discover() -> GameConfig {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let explicit = std::env::var_os("STICK_EXPORT_ROOT").map(PathBuf::from).or_else(|| args.first().map(PathBuf::from));
-        let export_root = explicit.or_else(Self::search_upwards).unwrap_or_else(|| {
+        let export_root = sticks_sim::options::find_export_root(args.first().map(String::as_str)).unwrap_or_else(|| {
             panic!(
                 "could not find the exported Unity project. Set STICK_EXPORT_ROOT (or pass the path as the first \
                  argument) to the `ExportedProject` directory inside `assets_exported`."
@@ -35,13 +34,6 @@ impl GameConfig {
         let level_from_command_line = args.get(1).is_some();
         let level_asset = args.get(1).cloned().unwrap_or_else(|| DEFAULT_LEVEL.to_owned());
         GameConfig { export_root, level_asset, level_from_command_line }
-    }
-
-    fn search_upwards() -> Option<PathBuf> {
-        let starts = [std::env::current_dir().ok(), std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))];
-        starts.into_iter().flatten().find_map(|start| {
-            start.ancestors().map(|dir| dir.join("assets_exported/ExportedProject")).find(|candidate| candidate.join("Assets").is_dir())
-        })
     }
 
     /// The export's `Assets/` directory; also the Bevy asset root.

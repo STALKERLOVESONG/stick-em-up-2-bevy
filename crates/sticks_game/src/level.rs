@@ -6,11 +6,12 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use sticks_sim::animator::AnimatorModel;
 use sticks_sim::physics::{PhysicsRules, World as CollisionWorld};
-use sticks_sim::setup::load_level_bundle;
+use sticks_sim::setup::load_level_bundle_with;
+use unity_data::level::AwakeConditions;
 use unity_data::level::Level;
 
 use crate::config::GameConfig;
-use crate::state::AppState;
+use crate::state::{AppState, Session};
 
 /// The scene file of the level to play, relative to the export root (what `LevelLoader` was
 /// asked to load).
@@ -46,7 +47,7 @@ impl Plugin for LevelPlugin {
 
 /// Reads the level on the second frame of `Loading`, so the loading screen is on display while
 /// the (blocking) parse runs.
-fn load_level_data(mut commands: Commands, config: Res<GameConfig>, source: Res<LevelSource>, mut next: ResMut<NextState<AppState>>, mut frames: Local<u8>) {
+fn load_level_data(mut commands: Commands, config: Res<GameConfig>, source: Res<LevelSource>, session: Res<Session>, mut next: ResMut<NextState<AppState>>, mut frames: Local<u8>) {
     // Two frames of the Level Loading scene first (the run entities spawned in the first appear
     // in the second).
     if *frames < 2 {
@@ -54,7 +55,11 @@ fn load_level_data(mut commands: Commands, config: Res<GameConfig>, source: Res<
         return;
     }
     *frames = 0;
-    let bundle = load_level_bundle(&config.export_root, &source.0).unwrap_or_else(|e| {
+    // `LevelLoader.PlayerCount` / `Difficulty` as the level's `Awake`s see them.
+    let conditions = AwakeConditions { player_count: session.player_count, difficulty: session.difficulty };
+    // `AllClientControlTypes` for the `ControlTypeDependentActivator` texts.
+    let control_types = session.control_types_name();
+    let bundle = load_level_bundle_with(&config.export_root, &source.0, Some(conditions), &control_types).unwrap_or_else(|e| {
         panic!("failed to load level {:?} from {}: {e}", source.0, config.export_root.display())
     });
     info!(

@@ -103,24 +103,16 @@ pub(crate) fn load_man_art(
     mut images: ResMut<Assets<Image>>,
 ) {
     let assets = config.assets_dir();
-    let rig = load_man_rig(&assets).unwrap_or_else(|e| panic!("Man.prefab: {e}"));
-    let palette = CharacterPalette::of_rig(&rig);
-    let avatar_text = std::fs::read_to_string(assets.join("Avatar/ManAvatar.asset")).unwrap_or_else(|e| panic!("ManAvatar.asset: {e}"));
-    let avatar = parse_avatar(&avatar_text).expect("ManAvatar.asset: not a humanoid avatar");
-
-    // The sprite collection is whichever one the level's own sprites use that holds the line
-    // and helmet sprites (as `SpriteFinder` resolves them).
     let scene = config.export_root.join(&source.0);
-    let library = load_collection_with_sprites(&assets, &scene, &["Line", "Helmet"]).unwrap_or_else(|e| panic!("sprite collection: {e}"));
-    let line = library.collection.sprite("Line").expect("Line sprite");
-    let atlas = library.texture_of(line).expect("the Line sprite's atlas");
-    let texture = textures.id(atlas, &mut TextureLoad::new(&assets, &asset_server, &mut images, &mut materials));
+    let (rig, avatar, library, texture) = load_man_parts(&assets, &scene, &mut textures, &mut TextureLoad::new(&assets, &asset_server, &mut images, &mut materials));
+    let palette = CharacterPalette::of_rig(&rig);
     let mut art = VisualArt::new(&library.collection, &rig).expect("the character's line and helmet sprites");
 
     // Every weapon's projectile prefab, the replacements the level's enemies launch instead
     // (`ProjectileLauncherModifier.projectilePrefab`), and the sprites those are drawn with (the
     // same atlas).
     let mut projectiles = HashMap::new();
+    let mut melee = HashMap::new();
     let rig_prefabs = rig.weapons.iter().filter(|w| !w.projectile.is_empty()).map(|w| (w.name.as_str(), w.projectile.as_str()));
     let enemy_prefabs = level.0.enemies.iter().flat_map(|e| &e.launcher_modifiers).filter_map(|m| Some((m.weapon.as_str(), m.projectile.as_deref()?)));
     // Helicopter guns' launchers too.
@@ -134,15 +126,57 @@ pub(crate) fn load_man_art(
                 projectiles.insert(guid.to_owned(), Arc::new(spec));
             }
             // Melee weapons launch an effect prefab (the Sword's "Sword Swish") that is not a
-            // flying `Projectile`; they need their own implementation.
-            Ok(None) => info!("{weapon} launches a melee effect, not a projectile: not implemented yet"),
+            // flying `Projectile` (`sticks_sim::melee`).
+            Ok(None) => match unity_data::projectile::try_load_melee(&assets, guid) {
+                Ok(Some(spec)) => {
+                    melee.insert(guid.to_owned(), Arc::new(spec));
+                }
+                Ok(None) => warn!("{weapon} launches {guid}, which is neither a projectile nor a melee effect"),
+                Err(e) => warn!("melee prefab of {weapon}: {e}"),
+            },
             Err(e) => warn!("launcher prefab of {weapon}: {e}"),
         }
     }
     art.add_sprites(&library.collection, projectiles.values().flat_map(|spec| spec.sprites.iter().map(|s| s.sprite_name.as_str())));
     commands.insert_resource(ProjectileLibrary(projectiles));
+    commands.insert_resource(crate::weapon::MeleeLibrary(melee));
     let model = CharacterRigModel::new(avatar, rig).expect("the humanoid avatar does not fit the Man rig");
     commands.insert_resource(ManArt { model: Arc::new(model), art, palette, texture });
+}
+
+/// The `Man` rig, its humanoid avatar, and the sprite collection its lines and helmet are drawn
+/// from: whichever collection the scene's own sprites use that holds the "Line" and "Helmet"
+/// sprites (as `SpriteFinder` resolves them), with the queue texture of its atlas.
+pub(crate) fn load_man_parts(
+    assets: &std::path::Path,
+    scene: &std::path::Path,
+    textures: &mut UnityTextures,
+    load: &mut TextureLoad<'_, '_>,
+) -> (unity_data::rig::Rig, unity_data::humanoid::HumanAvatar, unity_data::sprites::SpriteLibrary, u32) {
+    let rig = load_man_rig(assets).unwrap_or_else(|e| panic!("Man.prefab: {e}"));
+    let avatar_text = std::fs::read_to_string(assets.join("Avatar/ManAvatar.asset")).unwrap_or_else(|e| panic!("ManAvatar.asset: {e}"));
+    let avatar = parse_avatar(&avatar_text).expect("ManAvatar.asset: not a humanoid avatar");
+    let library = load_collection_with_sprites(assets, scene, &["Line", "Helmet"]).unwrap_or_else(|e| panic!("sprite collection: {e}"));
+    let line = library.collection.sprite("Line").expect("Line sprite");
+    let atlas = library.texture_of(line).expect("the Line sprite's atlas");
+    let texture = textures.id(atlas, load);
+    (rig, avatar, library, texture)
+}
+
+impl ManArt {
+    /// The `Man` art for a scene other than a level (the Lobby's posed models); `None` when a
+    /// part is missing.
+    pub(crate) fn for_scene(assets: &std::path::Path, scene: &std::path::Path, textures: &mut UnityTextures, load: &mut TextureLoad<'_, '_>) -> Option<ManArt> {
+        let rig = load_man_rig(assets).ok()?;
+        let avatar = parse_avatar(&std::fs::read_to_string(assets.join("Avatar/ManAvatar.asset")).ok()?)?;
+        let library = load_collection_with_sprites(assets, scene, &["Line", "Helmet"]).ok()?;
+        let atlas = library.texture_of(library.collection.sprite("Line")?)?;
+        let texture = textures.id(atlas, load);
+        let palette = CharacterPalette::of_rig(&rig);
+        let art = VisualArt::new(&library.collection, &rig)?;
+        let model = CharacterRigModel::new(avatar, rig)?;
+        Some(ManArt { model: Arc::new(model), art, palette, texture })
+    }
 }
 
 fn attach_hit_flash(mut commands: Commands, new_avatars: Query<Entity, (Added<Posed>, Without<HitFlash>)>) {

@@ -1,0 +1,12 @@
+[package]
+name = "sticks_launcher"
+description = "Stick 'Em Up 2 reimplementation: the launcher (cheats, settings and a player name, then the game)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The game's Bevy features, so one build compiles Bevy once for both programs.
+bevy = { version = "0.19", features = ["wav"] }
+sticks_sim = { path = "../sticks_sim" }
+unity_data = { path = "../unity_data" }

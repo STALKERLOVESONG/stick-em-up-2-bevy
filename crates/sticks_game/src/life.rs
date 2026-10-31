@@ -5,6 +5,8 @@
 //! [`Player`] slot entity; the character it controls is an avatar entity pointing back at it
 //! through [`ControlledBy`], like `ControlSlot.Controller`.
 
+use bevy::ecs::entity_disabling::Disabled;
+use bevy::ecs::query::Allow;
 use bevy::prelude::*;
 use sticks_sim::life::{LifeCycle, LifeEvent, Lives, RespawnEnv, Score};
 use sticks_sim::rng::GameRng;
@@ -133,6 +135,10 @@ fn apply_events(
     }
 }
 
+/// Development hook (not in the original): damage requests against this avatar are ignored.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct Invulnerable;
+
 /// `Health.Damage` for every request this frame, in arrival order.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_damage(
@@ -142,11 +148,38 @@ pub(crate) fn apply_damage(
     session: Res<Session>,
     clock: Res<FrameClock>,
     mut rng: ResMut<DeathRng>,
-    mut avatars: Query<(&mut Mortal, &mut Avatar, Option<&ControlledBy>, &mut CameraPlaceholder)>,
+    mut avatars: Query<(&mut Mortal, &mut Avatar, Option<&ControlledBy>, &mut CameraPlaceholder, Has<Invulnerable>)>,
     mut slots: Query<(&Player, Option<&mut PlayerLives>, &mut PlayerScore)>,
+    versus: Option<Res<crate::versus::VersusState>>,
+    mut net: ResMut<crate::net::Net>,
+    objects: Query<(Entity, &crate::net::NetObject), Allow<Disabled>>,
 ) {
-    for request in requests.read() {
-        let Ok((mut mortal, mut avatar, controlled_by, mut placeholder)) = avatars.get_mut(request.target) else { continue };
+    let versus_ended = versus.is_some_and(|v| v.ended);
+    // A network client applies the host's health instead of its own hits
+    // (`SyncServerDamageToClients.ChangedRemotely`: lower health is damage, starting health a
+    // reset); scores come from the host too.
+    let mut queue: Vec<Damage> = Vec::new();
+    let remote = net.is_client();
+    if remote {
+        requests.clear();
+        for (id, remaining) in std::mem::take(&mut net.health) {
+            let Some((entity, _)) = objects.iter().find(|(_, o)| o.id == id) else { continue };
+            let Ok((mut mortal, ..)) = avatars.get_mut(entity) else { continue };
+            let current = mortal.health.remaining();
+            if remaining < current {
+                queue.push(Damage { target: entity, amount: current - remaining, on_kill: OnKill::Nothing, responsible: None });
+            } else if remaining == mortal.health.starting() && current < remaining {
+                let _ = mortal.health.reset();
+            }
+        }
+    } else {
+        queue.extend(requests.read().copied());
+    }
+    for request in &queue {
+        let Ok((mut mortal, mut avatar, controlled_by, mut placeholder, invulnerable)) = avatars.get_mut(request.target) else { continue };
+        if invulnerable {
+            continue;
+        }
         // Deactivated objects receive no physics callbacks.
         if !mortal.avatar_active() {
             continue;
@@ -157,7 +190,7 @@ pub(crate) fn apply_damage(
         let remaining_before = mortal.health.remaining();
         let mut env = RespawnEnv {
             campaign: session.mode == GameMode::Campaign,
-            versus_ended: false, // TODO: VersusGameEnder (versus modes are not implemented yet)
+            versus_ended,
             spawn_point_count: level.0.spawn_points.len(),
             time_delta: clock.last_step_delta,
             rng: &mut rng.0,
@@ -168,6 +201,10 @@ pub(crate) fn apply_damage(
         };
         let newly_exhausted = !was_exhausted && mortal.health.is_exhausted();
         let dealt = remaining_before - mortal.health.remaining();
+        if remote {
+            apply_events(events, request.target, &mut avatar, &mut placeholder, &level, &session, &mut notices);
+            continue;
+        }
         if request.on_kill == OnKill::SelfFrag && newly_exhausted {
             if let Some((player, _, mut score)) = controller.and_then(|c| slots.get_mut(c).ok()) {
                 score.self_fragged(player.index);
@@ -211,12 +248,15 @@ pub(crate) fn tick_lives(
     mut rng: ResMut<DeathRng>,
     mut notices: MessageWriter<LifeNotice>,
     mut avatars: Query<(Entity, &mut Mortal, &mut Avatar, &mut CameraPlaceholder)>,
+    versus: Option<Res<crate::versus::VersusState>>,
 ) {
+    // `VersusGameEnder.GameEnded`.
+    let versus_ended = versus.is_some_and(|v| v.ended);
     let delta = clock.stepper.frame().delta;
     for (entity, mut mortal, mut avatar, mut placeholder) in &mut avatars {
         let mut env = RespawnEnv {
             campaign: session.mode == GameMode::Campaign,
-            versus_ended: false,
+            versus_ended,
             spawn_point_count: level.0.spawn_points.len(),
             time_delta: delta,
             rng: &mut rng.0,

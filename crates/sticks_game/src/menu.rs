@@ -1,11 +1,7 @@
-//! The loading screen, the pause menu and the clean-up when a game ends. The game's menus are the
-//! Lobby scene (`lobby`).
-//!
-//! TODO(UNCERTAIN): the original's "Level Loading" scene and `InGameMenuHandler` pause menu are
-//! not reconstructed yet; these two screens are functional Bevy UI with the same flow (pause with
-//! Escape, back to the Lobby), not a visual copy.
+//! `Time.timeScale`, what the in-game screens ask for (restart, back to the Lobby, the next
+//! level) and the clean-up when a game ends. The screens themselves are the Permanent System's
+//! `In-Game UI` (`ingame_ui`); the game's menus are the Lobby scene (`lobby`).
 
-use bevy::app::AppExit;
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::query::Allow;
 use bevy::prelude::*;
@@ -13,148 +9,142 @@ use bevy::prelude::*;
 use crate::camera::LevelCamera;
 use crate::hud::Hud;
 use crate::level::LevelGeometry;
+use crate::lobby::LobbyMemory;
 use crate::player::{Avatar, Player};
 use crate::state::AppState;
 use crate::weapon::Projectile;
 
-const OVERLAY: Color = Color::srgba(0.0, 0.0, 0.0, 0.65);
-const BUTTON_NORMAL: Color = Color::srgb(0.18, 0.2, 0.26);
-const BUTTON_HOVERED: Color = Color::srgb(0.28, 0.32, 0.42);
-const BUTTON_PRESSED: Color = Color::srgb(0.9, 0.35, 0.3);
-
-/// `Time.timeScale == 0` while a menu is open: the gameplay sets do not run.
-#[derive(Resource, Default)]
-pub struct Paused(pub bool);
-
-/// Run condition for the gameplay sets.
-pub fn not_paused(paused: Res<Paused>) -> bool {
-    !paused.0
+/// `Time.timeScale`: 0 while a `Pause` menu is open (the gameplay sets do not run), 0.4 in the
+/// end-of-level slow motion. `debug_factor` is a development hook (not in the original) that
+/// multiplies the game speed.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct TimeScale {
+    pub scale: f32,
+    pub debug_factor: f32,
 }
 
-#[derive(Component)]
-struct PauseScreen;
+impl Default for TimeScale {
+    fn default() -> Self {
+        TimeScale { scale: 1.0, debug_factor: 1.0 }
+    }
+}
 
-#[derive(Component, Clone, Copy)]
-enum MenuAction {
-    Resume,
-    MainMenu,
-    Quit,
+/// Run condition for the gameplay sets: `FixedUpdate` does not run and `Update` sees a zero
+/// delta while `Time.timeScale` is 0, so nothing moves.
+pub fn not_paused(time_scale: Res<TimeScale>) -> bool {
+    time_scale.scale > 0.0
+}
+
+/// What the in-game screens' buttons ask the level loader for.
+#[derive(Message, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadRequest {
+    /// `RestartLevelButton` → `LevelLoader.StartGame()`: the selected level again.
+    Restart,
+    /// `ReturnToLobbyButton` → `LevelLoader.ReturnToLobby()`.
+    ReturnToLobby,
+    /// `LevelCompleteButton`: the last campaign level goes back to the first and loads the
+    /// "Complete" scene; any other advances `LobbyLevelSelect.Index` and returns to the Lobby.
+    LevelCompleted,
 }
 
 pub struct MenuPlugin;
 
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Paused>()
+        app.init_resource::<TimeScale>()
+            .add_message::<LoadRequest>()
             .add_systems(OnExit(AppState::InGame), cleanup_game)
-            .add_systems(Update, (menu_buttons, toggle_pause.run_if(in_state(AppState::InGame))));
+            .add_systems(Last, apply_time_scale)
+            .add_systems(Update, load_requests.run_if(in_state(AppState::InGame)));
     }
 }
 
-/// A full-screen column of centred items.
-fn screen(background: Color) -> (Node, BackgroundColor) {
-    (
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            position_type: PositionType::Absolute,
-            flex_direction: FlexDirection::Column,
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            row_gap: Val::Px(16.0),
-            ..default()
-        },
-        BackgroundColor(background),
-    )
+/// `Time.timeScale` drives the virtual clock everything in `Update` reads (the next frame's
+/// delta).
+fn apply_time_scale(time_scale: Res<TimeScale>, mut time: ResMut<Time<Virtual>>) {
+    let speed = time_scale.scale.max(0.0) * time_scale.debug_factor.max(0.0);
+    if time.relative_speed() != speed {
+        time.set_relative_speed(speed);
+    }
 }
 
-fn spawn_label(commands: &mut Commands, parent: Entity, text: &str, size: f32) {
-    commands.spawn((Text::new(text), TextFont::from_font_size(size), TextColor(Color::WHITE), ChildOf(parent)));
-}
-
-fn spawn_button(commands: &mut Commands, parent: Entity, label: &str, action: MenuAction) {
-    let button = commands
-        .spawn((
-            Button,
-            action,
-            Node { width: Val::Px(260.0), height: Val::Px(54.0), justify_content: JustifyContent::Center, align_items: AlignItems::Center, ..default() },
-            BackgroundColor(BUTTON_NORMAL),
-            ChildOf(parent),
-        ))
-        .id();
-    spawn_label(commands, button, label, 28.0);
-}
-
-fn spawn_pause_screen(commands: &mut Commands) {
-    let root = commands.spawn((Name::new("Pause menu"), PauseScreen, screen(OVERLAY))).id();
-    spawn_label(commands, root, "PAUSED", 56.0);
-    spawn_button(commands, root, "Resume", MenuAction::Resume);
-    spawn_button(commands, root, "Main menu", MenuAction::MainMenu);
-    spawn_button(commands, root, "Quit", MenuAction::Quit);
-}
-
-/// Button colours and what a press does.
-fn menu_buttons(
-    mut commands: Commands,
-    mut buttons: Query<(&Interaction, &MenuAction, &mut BackgroundColor), Changed<Interaction>>,
+/// `LevelLoader.RequestLoad`: one load at a time.
+fn load_requests(
+    mut requests: MessageReader<LoadRequest>,
+    mut memory: ResMut<LobbyMemory>,
     mut next: ResMut<NextState<AppState>>,
-    mut paused: ResMut<Paused>,
+    mut net: ResMut<crate::net::Net>,
+    session: Res<crate::state::Session>,
+    source: Res<crate::level::LevelSource>,
 ) {
-    for (interaction, action, mut color) in &mut buttons {
-        color.0 = match interaction {
-            Interaction::Pressed => BUTTON_PRESSED,
-            Interaction::Hovered => BUTTON_HOVERED,
-            Interaction::None => BUTTON_NORMAL,
-        };
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        match action {
-            MenuAction::Resume => paused.0 = false,
-            MenuAction::MainMenu => next.set(AppState::Lobby),
-            MenuAction::Quit => {
-                commands.write_message(AppExit::Success);
+    let Some(&request) = requests.read().last() else { return };
+    // In a network game loads go through the host, which loads them everywhere
+    // (`SendRequestToLoad`).
+    if !net.is_offline() {
+        use sticks_net::LoadKind;
+        let kind = match request {
+            LoadRequest::Restart => LoadKind::Normal,
+            LoadRequest::ReturnToLobby => LoadKind::Lobby,
+            LoadRequest::LevelCompleted => {
+                // `LevelCompleteButton`: the shared level index moves on first.
+                let count = memory.campaign_levels.len();
+                if count > 0 && memory.level_index + 1 >= count {
+                    memory.level_index = 0;
+                    LoadKind::Complete
+                } else {
+                    memory.level_index += 1;
+                    LoadKind::Lobby
+                }
             }
+        };
+        if net.is_host() {
+            let level = match kind {
+                LoadKind::Normal => source.0.clone(),
+                LoadKind::Lobby => crate::net::LOBBY_LEVEL.to_owned(),
+                LoadKind::Complete => crate::net::COMPLETE_LEVEL.to_owned(),
+            };
+            net.host_load(level, session.mode, session.difficulty, session.player_count);
+        } else {
+            net.request_load(kind);
         }
+        return;
     }
-}
-
-/// Escape opens and closes the pause menu; the menu follows `Paused`.
-fn toggle_pause(
-    mut commands: Commands,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut paused: ResMut<Paused>,
-    screens: Query<Entity, With<PauseScreen>>,
-) {
-    if keys.just_pressed(KeyCode::Escape) {
-        paused.0 = !paused.0;
-    }
-    let showing = !screens.is_empty();
-    if paused.0 && !showing {
-        spawn_pause_screen(&mut commands);
-    } else if !paused.0 && showing {
-        for entity in &screens {
-            commands.entity(entity).despawn();
+    match request {
+        LoadRequest::Restart => next.set(AppState::Loading),
+        LoadRequest::ReturnToLobby => next.set(AppState::Lobby),
+        LoadRequest::LevelCompleted => {
+            let count = memory.campaign_levels.len();
+            if count > 0 && memory.level_index + 1 >= count {
+                memory.level_index = 0;
+                // TODO: `LevelLoader.GameComplete()` loads the "Complete" ending scene, which is
+                // not reconstructed; the Lobby is shown instead.
+                warn!("campaign complete: the ending scene is not reconstructed; back to the Lobby");
+            } else {
+                memory.level_index += 1;
+            }
+            next.set(AppState::Lobby);
         }
     }
 }
 
 /// Leaving a game removes everything it spawned; the next game builds it all again.
+/// `EndOfLevelTimeSlower.OnDestroy` and `InGameMenuHandler.CloseAllMenusImmediately` leave
+/// `Time.timeScale` at 1.
 #[allow(clippy::type_complexity)]
 fn cleanup_game(
     mut commands: Commands,
-    mut paused: ResMut<Paused>,
+    mut time_scale: ResMut<TimeScale>,
     // `Allow<Disabled>`: enemies asleep off screen are disabled entities and must go too.
     doomed: Query<
         Entity,
         (
-            Or<(With<LevelGeometry>, With<LevelCamera>, With<Player>, With<Avatar>, With<Projectile>, With<Hud>, With<PauseScreen>, With<crate::unity_render::QueueRun>)>,
+            Or<(With<LevelGeometry>, With<LevelCamera>, With<Player>, With<Avatar>, With<Projectile>, With<Hud>, With<crate::unity_render::QueueRun>, With<crate::helicopter::Helicopter>, With<crate::level_end::LevelEndEntity>, With<crate::weapon::MeleeSwing>)>,
             Allow<Disabled>,
         ),
     >,
 ) {
-    paused.0 = false;
+    time_scale.scale = 1.0;
     for entity in &doomed {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
 }

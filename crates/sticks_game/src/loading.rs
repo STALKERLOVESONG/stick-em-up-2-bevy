@@ -111,7 +111,7 @@ fn spawn_loading_scene(
 
 fn leave_loading_scene(mut commands: Commands, cameras: Query<Entity, With<LoadingCamera>>) {
     for entity in &cameras {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
     commands.remove_resource::<LoadingScreen>();
 }

@@ -136,7 +136,8 @@ fn update_debug_text(
 ) {
     let Ok((mut text, mut visibility)) = texts.single_mut() else { return };
     *visibility = if show.0 { Visibility::Inherited } else { Visibility::Hidden };
-    let Ok((avatar, mortal)) = avatars.single() else { return };
+    // The first player's avatar.
+    let Some((avatar, mortal)) = avatars.iter().next() else { return };
     if !show.0 {
         return;
     }

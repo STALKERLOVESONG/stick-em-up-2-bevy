@@ -4,19 +4,24 @@
 //! the screen objects and their `CameraPositionInfluencer` pulls the camera (a
 //! `CameraPositioner`, as in the levels) across to the active one. Buttons are tk2d text and
 //! `PolygonColliderRenderer` shapes with a 3D `BoxCollider` that the mouse clicks
-//! (`OnMouseUpAsButton`); Escape presses the visible back button.
+//! (`OnMouseUpAsButton`); any lobby input's back (Escape, a gamepad's B or Back) presses the
+//! visible back button. With a gamepad connected the buttons highlight (`Button.isDefault`,
+//! `up`/`down`/`left`/`right`, `returnToLastSelected`) and a gamepad's A presses the
+//! highlighted one.
 //!
 //! Everything drawn comes from the scene (sprites, polygon surfaces, tk2d text meshes and their
 //! shadows, lit by the camera-borne point light) through the same queue as the levels. What the
-//! scripts do is transcribed for the offline game with keyboard and mouse:
+//! scripts do is transcribed for the offline game with the keyboard and mouse and gamepads
+//! (`crate::input`; every available one is a `LobbyInput`):
 //!
 //! * `LobbyStartupDirector`, `SplashScreenAdvance`, `NoControllers`, `ActivateExclusively`,
 //!   `CameraPositionInfluencer`, `Button` (mouse events and the pressed z tween), `BackButton`,
 //!   `ActivateSomethingOnButtonPress`, `ExitButton`;
 //! * `NetworkSetup` (offline: "Play Offline"; with no server found on the LAN the "No Network
 //!   Games Found" label shows);
-//! * `ControlAssignment` with one controller (keyboard and mouse in Player 1; left/right moves
-//!   it between columns);
+//! * `ControlAssignment` (`sticks_sim::control_assignment`): a card per input under the column
+//!   it controls; its left/right or a drag moves it; `TeamArrangement` likewise for the players'
+//!   teams;
 //! * `GameSummary`, `GameModeDisplay`, `LevelNameDisplay`, `DifficultyDisplay`,
 //!   `CycleDifficulty`, `GameModeSelect`, `MakeGameModeConsistentWithPlayerCount`,
 //!   `SmoothDampTowards`;
@@ -26,22 +31,34 @@
 //! Audio: `PlaySoundOnButtonPress` and the photo pile's "Paper Slide" are queued in
 //! [`Lobby::sounds`] for the audio module.
 //!
-//! Player slots: the keyboard column chosen in control assignment is the local player's slot
-//! (`Player.PlayerIndex`); starting a game hands it, the player count and `LobbyTeams`' lists
-//! ([`LobbyMemory::teams`], kept like the original's statics) to the [`Session`], from which the
-//! level spawns the player (`PlayerSlotAssignments.OnLoadedLevelEverywhere` spawn-point
-//! assignment, `PlayerSpawner.Spawn` team and default colours, `Player.SetUp` HUD slot).
+//! Player slots: each control-assignment column with an available input is a player
+//! (`Player.PlayerIndex`); starting a game hands the players and their inputs, the player count
+//! and `LobbyTeams`' lists ([`LobbyMemory::teams`], kept like the original's statics) to the
+//! [`Session`], from which the level spawns them (`PlayerSlotAssignments.OnLoadedLevelEverywhere`
+//! spawn-point assignment, `PlayerSpawner.Spawn` team, default colours and processors,
+//! `Player.SetUp` HUD slots).
 //! "Readiness" is the original's: the Level Select's start button loads the level as soon as at
 //! least one slot has controls (`ControlAssignment.PlayerCount() >= 1`); there is no per-player
 //! ready flag in the game.
 //!
-//! Not reproduced: the network lobby (`NetworkSetup` hosting/joining, `ServerDiscovery`,
-//! `PlayerSlotAssignments`' claims and broadcasts, `RemoteColorAssignments`,
-//! `LobbyTeams.SendTeams`, `LobbyClientDisconnection`): Unity's legacy RakNet networking has no
-//! counterpart here and the port is offline only. The team arrangement screen (Team Versus
-//! needs more local controllers than the one keyboard-and-mouse input supported).
-//! TODO: the colour customisation screens and the posed `Man` models, achievements, credits,
-//! high scores, the level cards' flip animation and sliding labels, gamepad highlighting.
+//! Network games: [`network`] (hosting and joining on the LAN, the server list, slot claims,
+//! shared settings and colours, disconnection errors, the working "Send Link" button) with
+//! `crate::net`. A settings page (not in the original) is reached from the title screen
+//! ([`settings_page`]).
+//!
+//! The other screens live in [`screens`]: colour customisation (`CustomizeColor`, with the
+//! posed `Man` models of [`figures`] faded by `ColorModels`), the summary's models and team
+//! labels, high scores (`HighScoresDisplay`; the level cards' top scores, difficulty stars and
+//! high-score button), achievements (`GoalsDisplay`, `OverallGoalProgressDisplay`), the error
+//! screen (`LobbyError`) and the credits' links, version label and hidden cheats. Scores,
+//! colours, achievements and seen tips are saved like the original's `DataManager` files
+//! (`crate::save`).
+//! Not reproduced: touch input (and with it the swatch arrows).
+
+mod figures;
+pub mod network;
+mod screens;
+mod settings_page;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -63,6 +80,9 @@ use unity_data::sprites::SpriteLibrary;
 
 use crate::camera::{LevelCamera, Rig};
 use crate::config::GameConfig;
+use crate::input::{Gamepads, InputDevice};
+use sticks_sim::control_assignment::{ControlAssignment, DEACTIVATED_COLUMN, InputFrame};
+use sticks_sim::devices::LobbyMoves;
 use crate::level::LevelSource;
 use crate::state::{AppState, GameMode, Session};
 use crate::unity_render::{FrameQueue, QueueSet, SceneLight, SceneSetup, ShadowTexture, TextureLoad, UnityLitMaterial, UnityTextures, camera_view, extent, surface_style};
@@ -86,22 +106,105 @@ pub struct LobbyMemory {
     pub difficulty: i32,
     /// `LobbyLevelSelect.index`.
     pub level_index: usize,
-    /// Column of the keyboard-and-mouse input in control assignment: 0..=3 players, 4 unused.
-    pub keyboard_slot: usize,
+    /// `ControlAssignment.allPlayerInputs` / `deactivatedInputs`.
+    pub assignment: ControlAssignment<InputDevice>,
+    /// The lobby inputs available this frame (`LobbyInput.IsAvailable`).
+    pub available: Vec<InputDevice>,
     /// `LobbyTeams`' static team lists.
     pub teams: sticks_sim::lobby::LobbyTeams,
+    /// `LobbyLevelSelect.campaignLevels` as last read (the end-of-level button needs the count).
+    pub campaign_levels: Vec<String>,
+    /// `HighScores.scoreLists` (kept for the session; `DataManager` saving is not reproduced).
+    pub high_scores: sticks_sim::level_end::HighScores,
+    /// `LevelTips.tipsSeenByPlayerIDs`.
+    pub tips_seen: sticks_sim::level_end::TipsSeen,
+    /// `LocalPlayerColorAssignments.colors`.
+    pub colors: sticks_sim::lobby::ColorAssignments,
+    /// `Goals.progress`.
+    pub goals: sticks_sim::goals::Goals,
+    /// `AllLevelUnlockCheat.Enabled`.
+    pub all_levels_unlocked: bool,
+    /// `TrivialFPS.enabled` (toggled by `TrivialFPSEnabler`).
+    pub fps_display: bool,
+    /// Save files to write at the end of the frame (`DataManager.Save*`).
+    pub save: crate::save::SaveFlags,
+    /// The player's settings (not in the original; `crate::settings`).
+    pub settings: crate::settings::Settings,
 }
 
 impl Default for LobbyMemory {
     fn default() -> Self {
-        LobbyMemory { been_here_before: false, mode: GameMode::Campaign, difficulty: 0, level_index: 0, keyboard_slot: 0, teams: sticks_sim::lobby::LobbyTeams::default() }
+        LobbyMemory {
+            been_here_before: false,
+            mode: GameMode::Campaign,
+            difficulty: 0,
+            level_index: 0,
+            assignment: ControlAssignment::default(),
+            available: vec![InputDevice::KeyboardMouse],
+            teams: sticks_sim::lobby::LobbyTeams::default(),
+            campaign_levels: Vec::new(),
+            high_scores: sticks_sim::level_end::HighScores::default(),
+            tips_seen: sticks_sim::level_end::TipsSeen::default(),
+            colors: sticks_sim::lobby::ColorAssignments::default(),
+            goals: sticks_sim::goals::Goals::default(),
+            all_levels_unlocked: false,
+            fps_display: false,
+            save: crate::save::SaveFlags::default(),
+            settings: crate::settings::Settings::default(),
+        }
     }
 }
 
 impl LobbyMemory {
-    /// `ControlAssignment.PlayerCount`.
+    /// The defaults with whatever the save files hold (`DataManager.LoadAll`).
+    pub fn loaded() -> LobbyMemory {
+        let mut memory = LobbyMemory::default();
+        crate::save::load_all(&mut memory);
+        memory.settings = crate::settings::Settings::load();
+        memory
+    }
+
+    fn device_available(&self, device: InputDevice) -> bool {
+        self.available.contains(&device)
+    }
+
+    /// `ControlAssignment.PlayerCount` (offline: the local players).
     pub fn player_count(&self) -> usize {
-        usize::from(self.keyboard_slot < 4)
+        self.assignment.player_count(|d| self.device_available(d))
+    }
+
+    /// `ControlAssignment.IsPlayerActiveLocally`: one of the column's inputs is available.
+    pub fn is_player_active(&self, slot: usize) -> bool {
+        self.assignment.is_player_active(slot, |d| self.device_available(d))
+    }
+
+    /// `ControlAssignment.LobbyInputsForPlayer` that are available.
+    pub fn player_devices(&self, slot: usize) -> Vec<InputDevice> {
+        self.assignment.column(slot).iter().copied().filter(|&d| self.device_available(d)).collect()
+    }
+
+    /// The players a game starts with (`ControlTypesForPlayer` of every slot).
+    pub fn session_players(&self) -> Vec<crate::state::SessionPlayer> {
+        (0..sticks_sim::lobby::MAX_PLAYERS)
+            .map(|index| crate::state::SessionPlayer { index, devices: self.player_devices(index), remote: false })
+            .filter(|p| !p.devices.is_empty())
+            .collect()
+    }
+
+    /// `ControlAssignment.GetLocalPlayerID` offline: every slot's anonymous local id (slot 0
+    /// would be the Steam user's, which falls back to the same without Steam).
+    pub fn player_id(slot: usize) -> sticks_sim::level_end::PlayerId {
+        sticks_sim::level_end::PlayerId::anonymous_local(slot)
+    }
+
+    /// `ControlAssignment.GetPlayerColors`.
+    pub fn player_colors(&self, slot: usize) -> sticks_sim::lobby::CharacterColors {
+        self.colors.get(&Self::player_id(slot))
+    }
+
+    /// `Goals.CampaignLevelCount`.
+    pub fn campaign_level_count(&self) -> usize {
+        self.campaign_levels.len()
     }
 }
 
@@ -136,6 +239,7 @@ pub fn level_display_name(id: &str) -> &str {
     }
 }
 
+#[derive(Clone)]
 enum Art {
     Sprite { geometry: Geometry, texture: u32 },
     SpriteShadow(LevelShadow),
@@ -143,12 +247,14 @@ enum Art {
     Text(usize),
 }
 
+#[derive(Clone)]
 struct Renderable {
     object: usize,
     art: Art,
 }
 
 /// A `tk2dTextMesh` of the scene with what scripts change at run time.
+#[derive(Clone)]
 struct TextItem {
     object: usize,
     font: String,
@@ -161,6 +267,7 @@ struct TextItem {
     shadow_of: Option<(usize, Option<String>, f32)>,
 }
 
+#[derive(Clone)]
 struct ButtonState {
     object: usize,
     /// `Button.background`: the "Background" child, or the button itself.
@@ -171,9 +278,21 @@ struct ButtonState {
     tween_velocity: f32,
     mouse_down: bool,
     mouse_entered: bool,
+    /// `Button.up` / `down` / `left` / `right` (button objects).
+    neighbours: [Option<usize>; 4],
+    /// `isDefault` (changed at run time with `returnToLastSelected`), `returnToLastSelected`.
+    is_default: bool,
+    return_to_last_selected: bool,
+    was_highlighted: bool,
+    /// Active in the hierarchy last frame (`OnDisable` hands the highlight on).
+    was_active: bool,
 }
 
+/// `Button.highlightedTextColor` (255, 143, 56).
+const HIGHLIGHTED_TEXT: [f32; 4] = [1.0, 143.0 / 255.0, 56.0 / 255.0, 1.0];
+
 /// A `SmoothDampTowards` mover (local position, target, velocity).
+#[derive(Clone)]
 struct Mover {
     object: usize,
     smooth_time: f32,
@@ -191,6 +310,8 @@ struct SlidingLabel {
     /// The prototype object (its parent, rotation and scale are the label's).
     prototype_object: usize,
     text: String,
+    /// `tk2dTextMesh.color` set at run time (the top scores' regular or golden colour).
+    color: Option<[f32; 4]>,
     local: [f32; 3],
     velocity: [f32; 3],
     target: [f32; 3],
@@ -230,8 +351,12 @@ struct LevelSelectState {
     number_offscreen: [f32; 3],
     score_selected: [f32; 3],
     stars: Vec<usize>,
+    /// `completedDifficultyStarLocalPositions`.
+    star_positions: Vec<[f32; 3]>,
     star_offscreen: [f32; 3],
     high_scores: Option<usize>,
+    /// `highScoresButtonEnabledLocalPosition`.
+    high_scores_enabled: [f32; 3],
     trailer: Option<usize>,
     upgrade: Option<usize>,
     buttons_offscreen: [f32; 3],
@@ -299,6 +424,81 @@ pub struct Lobby {
     /// (`ScreenToWorldPoint(mouse, |camera z|)`).
     drag: Option<DragState>,
     mouse_world: Option<[f32; 2]>,
+    /// Objects the mouse went down on this frame (`OnMouseDown`).
+    mouse_downs: Vec<usize>,
+    /// Translation added to instantiated copies placed under another parent.
+    rebase: HashMap<usize, [f32; 3]>,
+    /// The posed models.
+    figures: Option<figures::Figures>,
+    /// State of the other screens' scripts.
+    screens: screens::Screens,
+    /// `Application.version` and `Application.unityVersion` (`VersionNumberLabel`).
+    versions: Option<(String, String)>,
+    /// `ControlAssignment.StartGUI`: one card per lobby input.
+    input_cards: Option<CardColumns<InputDevice>>,
+    /// The control-assignment screen was up last frame (`OnEnable` sets
+    /// `firstUpdateSinceEnabled`).
+    assignment_was_active: bool,
+    /// `TeamArrangement.Start`: one card per player slot.
+    player_cards: Option<CardColumns<usize>>,
+    /// `Button.highlighted` (an index into `buttons`), for gamepads.
+    highlighted: Option<usize>,
+    /// The network screens' state.
+    network: network::NetworkScreens,
+    /// The settings page (not in the original).
+    settings_page: Option<settings_page::SettingsPage>,
+}
+
+/// Draggable cards made from a prototype (`ControlAssignment` / `TeamArrangement`), stacked
+/// under column headings.
+struct CardColumns<K> {
+    cards: Vec<(K, usize)>,
+    prototype: usize,
+    /// `buttonStartY`, `buttonDistanceY` (the prototype's `BoxCollider` height × 1.2),
+    /// `offBottomOfScreen.localPosition.y`.
+    start_y: f32,
+    distance_y: f32,
+    off_bottom_y: f32,
+}
+
+impl<K: Copy + PartialEq> CardColumns<K> {
+    /// `Start`: the prototype's place and size; the prototype itself is destroyed.
+    fn start(lobby: &mut Lobby, prototype: usize, off_bottom: Option<usize>) -> CardColumns<K> {
+        let world = lobby.world(prototype);
+        let height = lobby.scene.boxes.iter().find(|b| b.object == prototype).map_or(0.0, |b| {
+            // `BoxCollider.bounds.size.y`: the world box's vertical extent.
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
+            for corner in 0..8 {
+                let sign = |bit: usize| if corner & bit == 0 { -0.5 } else { 0.5 };
+                let p = [b.center[0] + sign(1) * b.size[0], b.center[1] + sign(2) * b.size[1], b.center[2] + sign(4) * b.size[2]];
+                let y = world.transform_point(p)[1];
+                lo = lo.min(y);
+                hi = hi.max(y);
+            }
+            hi - lo
+        });
+        let start_y = lobby.local[prototype][1];
+        lobby.active[prototype] = false;
+        CardColumns { cards: Vec::new(), prototype, start_y, distance_y: height * 1.2, off_bottom_y: off_bottom.map_or(-10.0, |o| lobby.local[o][1]), }
+    }
+
+    /// The card of `key` (instantiated, inactive, on first need).
+    fn card(&mut self, lobby: &mut Lobby, key: K) -> usize {
+        if let Some(&(_, card)) = self.cards.iter().find(|(k, _)| *k == key) {
+            return card;
+        }
+        let local = lobby.local[self.prototype];
+        let card = lobby.instantiate(self.prototype, None, local);
+        lobby.active[card] = false;
+        self.cards.push((key, card));
+        card
+    }
+
+    /// `ButtonY(rowIndex)`.
+    fn row_y(&self, row: usize) -> f32 {
+        self.start_y - self.distance_y * row as f32
+    }
 }
 
 impl Lobby {
@@ -320,8 +520,9 @@ impl Lobby {
         let mut current = Some(object);
         while let Some(i) = current {
             let o = &self.scene.objects[i];
+            let rebase = self.rebase.get(&i).copied().unwrap_or([0.0; 3]);
             for k in 0..3 {
-                world.t[k] += self.local[i][k] - o.local_position[k];
+                world.t[k] += self.local[i][k] - o.local_position[k] + rebase[k];
             }
             current = o.parent;
         }
@@ -385,6 +586,136 @@ impl Lobby {
         self.buttons.iter().position(|b| b.object == object)
     }
 
+    /// `Button.Up` / `Down` / `Left` / `Right` (`direction` 0..3): the neighbour, passing over
+    /// switched-off ones in the same direction.
+    fn neighbour(&self, button: usize, direction: usize) -> Option<usize> {
+        let mut current = button;
+        for _ in 0..self.buttons.len() {
+            let next = self.buttons[current].neighbours[direction].and_then(|o| self.button_index(o))?;
+            if self.active_in_hierarchy(self.buttons[next].object) {
+                return Some(next);
+            }
+            current = next;
+        }
+        None
+    }
+
+    /// `Object.Instantiate(prototype)` placed under `parent` (`None`: the prototype's own parent)
+    /// at `local`: a copy of the subtree with its renderers, texts, buttons, movers, scripts and
+    /// mouse colliders. The copies keep the prototype's scene-file world transforms (a copy
+    /// under another parent is rebased by the parents' difference), so everything drawn from the
+    /// scene follows their run-time positions like any other object. Returns the copy's root.
+    fn instantiate(&mut self, prototype: usize, parent: Option<usize>, local: [f32; 3]) -> usize {
+        let old_parent = self.scene.objects[prototype].parent;
+        let new_parent = parent.or(old_parent);
+        let mut order = vec![prototype];
+        let mut k = 0;
+        while k < order.len() {
+            order.extend(self.scene.objects[order[k]].children.iter().copied());
+            k += 1;
+        }
+        let first = self.scene.objects.len();
+        let map: HashMap<usize, usize> = order.iter().enumerate().map(|(i, &o)| (o, first + i)).collect();
+        for &o in &order {
+            let mut node = self.scene.objects[o].clone();
+            if o != prototype {
+                node.parent = node.parent.map(|p| map[&p]);
+            }
+            node.children = node.children.iter().map(|c| map[c]).collect();
+            self.scene.objects.push(node);
+            self.active.push(self.active[o]);
+            self.local.push(self.local[o]);
+        }
+        let root = map[&prototype];
+        self.scene.objects[root].parent = new_parent;
+        if let Some(parent) = new_parent {
+            self.scene.objects[parent].children.push(root);
+        }
+        if new_parent != old_parent {
+            let at = |p: Option<usize>| p.map_or([0.0; 3], |p| self.scene.objects[p].world.t);
+            let (a, b) = (at(new_parent), at(old_parent));
+            self.rebase.insert(root, [a[0] - b[0], a[1] - b[1], a[2] - b[2]]);
+        }
+        self.local[root] = local;
+        // Texts (a shadow copy keeps following its own caster's copy).
+        let mut item_map = HashMap::new();
+        for i in 0..self.texts.len() {
+            if let Some(&o) = map.get(&self.texts[i].object) {
+                let mut t = self.texts[i].clone();
+                t.object = o;
+                item_map.insert(i, self.texts.len());
+                if t.shadow_of.is_none() {
+                    self.text_of_object.insert(o, self.texts.len());
+                }
+                self.texts.push(t);
+            }
+        }
+        for &new in item_map.values() {
+            if let Some(shadow) = self.texts[new].shadow_of.as_mut() {
+                if let Some(&caster) = item_map.get(&shadow.0) {
+                    shadow.0 = caster;
+                }
+            }
+        }
+        for i in 0..self.art.len() {
+            if let Some(&o) = map.get(&self.art[i].object) {
+                let mut r = self.art[i].clone();
+                r.object = o;
+                if let Art::Text(t) = &mut r.art {
+                    *t = item_map.get(t).copied().unwrap_or(*t);
+                }
+                self.art.push(r);
+            }
+        }
+        for i in 0..self.buttons.len() {
+            if let Some(&o) = map.get(&self.buttons[i].object) {
+                let mut b = self.buttons[i].clone();
+                b.object = o;
+                b.background = map.get(&b.background).copied().unwrap_or(b.background);
+                b.text = b.text.map(|t| map.get(&t).copied().unwrap_or(t));
+                self.buttons.push(b);
+            }
+        }
+        for i in 0..self.movers.len() {
+            if let Some(&o) = map.get(&self.movers[i].object) {
+                let mut m = self.movers[i].clone();
+                m.object = o;
+                m.target = self.local[o];
+                self.movers.push(m);
+            }
+        }
+        let scripts: Vec<ScriptInstance> = self.scene.scripts.iter().filter(|s| map.contains_key(&s.object)).cloned().collect();
+        for mut s in scripts {
+            s.object = map[&s.object];
+            self.scene.scripts.push(s);
+        }
+        let boxes: Vec<_> = self.scene.boxes.iter().filter(|b| map.contains_key(&b.object)).cloned().collect();
+        for mut b in boxes {
+            b.object = map[&b.object];
+            self.scene.boxes.push(b);
+        }
+        for (&o, &n) in &map {
+            if let Some(&sorting) = self.scene.sorting.get(&o) {
+                self.scene.sorting.insert(n, sorting);
+            }
+        }
+        root
+    }
+
+    /// `tk2dSprite.color` of the sprites drawn for `object` (not their shadow copies).
+    fn set_sprite_color(&mut self, object: usize, color: [f32; 4]) {
+        let c = sticks_sim::visual::to_color32(color).map(|v| f32::from(v) / 255.0);
+        for r in &mut self.art {
+            if r.object == object {
+                if let Art::Sprite { geometry, .. } = &mut r.art {
+                    for v in &mut geometry.colors {
+                        *v = c;
+                    }
+                }
+            }
+        }
+    }
+
     /// `Button.IsVisible`: its text (or background) renderer is drawn by the camera.
     fn button_visible(&self, button: usize, view: &sticks_sim::draw::View) -> bool {
         let b = &self.buttons[button];
@@ -397,12 +728,53 @@ pub struct LobbyPlugin;
 
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LobbyMemory>()
+        app.insert_resource(LobbyMemory::loaded())
             .init_resource::<LobbyClicks>()
             .add_systems(OnEnter(AppState::Lobby), enter_lobby)
             .add_systems(OnExit(AppState::Lobby), leave_lobby)
             .add_systems(Update, (lobby_mouse, lobby_update, lobby_camera).chain().run_if(in_state(AppState::Lobby)).before(QueueSet::Light))
-            .add_systems(Update, queue_lobby.in_set(QueueSet::Collect).run_if(in_state(AppState::Lobby)));
+            .add_systems(Update, queue_lobby.in_set(QueueSet::Collect).run_if(in_state(AppState::Lobby)))
+            .add_systems(Update, trivial_fps);
+    }
+}
+
+/// `TrivialFPS`' label (the Permanent System's, so it stays up in levels too).
+#[derive(Component)]
+struct FpsLabel;
+
+/// `TrivialFPS.Update` / `OnGUI` while `TrivialFPSEnabler` has switched it on: frames counted
+/// over each 0.5 s of unscaled time, shown at the top left (100 × 32).
+/// TODO(UNCERTAIN): the label's `GUIStyle` (font, size, colour) is not recovered; Bevy's default
+/// text style is used.
+fn trivial_fps(
+    mut commands: Commands,
+    memory: Res<LobbyMemory>,
+    time: Res<Time<Real>>,
+    mut labels: Query<(Entity, &mut Text), With<FpsLabel>>,
+    mut counter: Local<(u32, i64)>,
+) {
+    const INTERVAL: f32 = 0.5;
+    let Ok((entity, mut text)) = labels.single_mut() else {
+        if memory.fps_display {
+            commands.spawn((
+                FpsLabel,
+                Text::new(""),
+                Node { position_type: PositionType::Absolute, left: Val::Px(0.0), top: Val::Px(0.0), width: Val::Px(100.0), height: Val::Px(32.0), ..default() },
+            ));
+        }
+        return;
+    };
+    if !memory.fps_display {
+        commands.entity(entity).try_despawn();
+        return;
+    }
+    counter.0 += 1;
+    let interval = (time.elapsed_secs() / INTERVAL) as i64;
+    if interval != counter.1 {
+        let fps = counter.0 as f32 / INTERVAL;
+        counter.0 = 0;
+        counter.1 = interval;
+        text.0 = format!("{}", fps.round() as i32);
     }
 }
 
@@ -516,7 +888,22 @@ fn enter_lobby(
         let text = scene.child(object, "Text");
         let unhighlighted = text.and_then(|t| text_of_object.get(&t)).map_or(NORMAL_TEXT, |&i: &usize| texts[i].color);
         let pressed_z = -0.04 - scene.objects[background].local_position[2];
-        buttons.push(ButtonState { object, background, text, unhighlighted, pressed_z, tween_velocity: 0.0, mouse_down: false, mouse_entered: false });
+        let neighbours = ["up", "down", "left", "right"].map(|f| scene.field_object(s, f));
+        buttons.push(ButtonState {
+            object,
+            background,
+            text,
+            unhighlighted,
+            pressed_z,
+            tween_velocity: 0.0,
+            mouse_down: false,
+            mouse_entered: false,
+            neighbours,
+            is_default: s.fields.bool_of("isDefault").unwrap_or(false),
+            return_to_last_selected: s.fields.bool_of("returnToLastSelected").unwrap_or(false),
+            was_highlighted: false,
+            was_active: false,
+        });
     }
     let movers = scene
         .scripts_named("SmoothDampTowards")
@@ -552,6 +939,7 @@ fn enter_lobby(
         campaign_images: image_ids("campaignLevelImages", &mut textures, &mut load),
         versus_images: image_ids("versusLevelImages", &mut textures, &mut load),
     };
+    memory.campaign_levels = levels.campaign.clone();
     info!(
         "lobby: {} objects, {} renderers, {} texts, {} buttons, {} campaign and {} versus levels",
         scene.objects.len(),
@@ -583,6 +971,10 @@ fn enter_lobby(
     commands.insert_resource(setup);
     commands.insert_resource(ShadowTexture(white));
 
+    let figures = figures::Figures::load(&scene, root, "Assets/Game/Lobby/Lobby.unity", &mut textures, &mut load);
+    if figures.is_none() {
+        warn!("lobby: the posed models could not be loaded");
+    }
     let active = scene.objects.iter().map(|o| o.active_self).collect();
     let local = scene.objects.iter().map(|o| o.local_position).collect();
     let display_level = memory.level_index as i32;
@@ -611,7 +1003,22 @@ fn enter_lobby(
         heading_colors: None,
         drag: None,
         mouse_world: None,
+        mouse_downs: Vec::new(),
+        rebase: HashMap::new(),
+        figures,
+        screens: screens::Screens::default(),
+        versions: application_versions(root),
+        input_cards: None,
+        assignment_was_active: false,
+        player_cards: None,
+        highlighted: None,
+        network: network::NetworkScreens::default(),
+        settings_page: None,
     };
+    lobby.settings_page = settings_page::build(&mut lobby);
+    if lobby.settings_page.is_none() {
+        warn!("lobby: the settings page could not be built");
+    }
 
     // `GameModeSelect.Start` captions.
     if let Some(s) = lobby.named_script("GameModeSelect").cloned() {
@@ -634,9 +1041,19 @@ fn enter_lobby(
     commands.insert_resource(lobby);
 }
 
+/// `Application.version` (`PlayerSettings.bundleVersion`) and `Application.unityVersion` from
+/// the export's project settings.
+fn application_versions(export_root: &std::path::Path) -> Option<(String, String)> {
+    let settings = std::fs::read_to_string(export_root.join("ProjectSettings/ProjectSettings.asset")).ok()?;
+    let version = settings.lines().find_map(|l| l.trim().strip_prefix("bundleVersion:")).map(|v| v.trim().to_owned())?;
+    let project = std::fs::read_to_string(export_root.join("ProjectSettings/ProjectVersion.txt")).ok()?;
+    let unity = project.lines().find_map(|l| l.trim().strip_prefix("m_EditorVersion:")).map(|v| v.trim().to_owned())?;
+    Some((version, unity))
+}
+
 fn leave_lobby(mut commands: Commands, cameras: Query<Entity, With<LobbyCamera>>) {
     for entity in &cameras {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
     commands.remove_resource::<Lobby>();
 }
@@ -750,6 +1167,7 @@ fn lobby_mouse(
     }
     if buttons.just_pressed(MouseButton::Left) {
         lobby.pressed_on = now;
+        lobby.mouse_downs.extend(now);
         if let Some(i) = now.and_then(|o| lobby.button_index(o)) {
             lobby.buttons[i].mouse_down = true;
         }
@@ -789,16 +1207,64 @@ fn lobby_update(
     mut next: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
     mut clicks: ResMut<LobbyClicks>,
+    mut pads: ResMut<Gamepads>,
+    mut net: ResMut<crate::net::Net>,
 ) {
     let dt = time.delta_secs().min(1.0 / 3.0);
     let lobby = &mut *lobby;
-    // `KeyboardAndMouseLobbyInput.ProcessInput` (the only lobby input without gamepads).
-    let any_pressed = keys.get_just_pressed().next().is_some() || mouse.get_just_pressed().next().is_some();
-    // `Keyboard.LeftPressedThisFrame` / `RightPressedThisFrame`: `GetKeyDown(KeyCode.A / D)`.
-    let move_left = keys.just_pressed(KeyCode::KeyA);
-    let move_right = keys.just_pressed(KeyCode::KeyD);
-    let back = keys.just_pressed(KeyCode::Escape);
+    let net = &mut *net;
+    // Every available `LobbyInput` this frame: `KeyboardAndMouseLobbyInput` (A/D move,
+    // Escape is back, any key or mouse button counts as a press; always idle) and
+    // `XboxishGamepadLobbyInput` per gamepad.
+    let devices = pads.devices();
+    let moves: Vec<(InputDevice, LobbyMoves)> = devices
+        .iter()
+        .filter_map(|&d| match d {
+            InputDevice::KeyboardMouse => Some((
+                d,
+                LobbyMoves {
+                    left: keys.just_pressed(KeyCode::KeyA),
+                    right: keys.just_pressed(KeyCode::KeyD),
+                    back: keys.just_pressed(KeyCode::Escape),
+                    anything_pressed: keys.get_just_pressed().next().is_some() || mouse.get_just_pressed().next().is_some(),
+                    ..LobbyMoves::default()
+                },
+            )),
+            InputDevice::Gamepad(k) => pads.frame_mut(k).map(|f| (d, f.lobby.process(&f.state, &f.edges))),
+        })
+        .collect();
+    memory.available = devices;
+    let any = |test: fn(&LobbyMoves) -> bool| moves.iter().any(|(_, m)| test(m));
+    let any_pressed = any(|m| m.anything_pressed);
+    // `LobbyInput.All.Any(input => input.MoveLeft)` and friends.
+    let move_left = any(|m| m.left);
+    let move_right = any(|m| m.right);
+    let back = any(|m| m.back);
+    let gamepad_available = moves.iter().any(|(d, _)| matches!(d, InputDevice::Gamepad(_)));
+    // Each player's own inputs' moves (`LobbyInputsForPlayer(i)`).
+    let mut player_moves = [(0i32, 0i32); sticks_sim::lobby::MAX_PLAYERS];
+    for (slot, pm) in player_moves.iter_mut().enumerate() {
+        for d in memory.player_devices(slot) {
+            if let Some((_, m)) = moves.iter().find(|(x, _)| *x == d) {
+                pm.0 += i32::from(m.left);
+                pm.1 += i32::from(m.right);
+            }
+        }
+    }
+    let mouse_player = (0..sticks_sim::lobby::MAX_PLAYERS).find(|&i| memory.player_devices(i).contains(&InputDevice::KeyboardMouse));
     let view = rigs.single().ok().map(|rig| camera_view(rig, &windows));
+
+    // The models' physics steps (`FixedUpdate` comes before `Update`).
+    let mut model_delta = dt;
+    if let Some(mut figures) = lobby.figures.take() {
+        model_delta = figures.fixed_steps(time.delta_secs(), |root| lobby.scene.active_in_hierarchy(root, &lobby.active));
+        lobby.figures = Some(figures);
+    }
+
+    // `OnMouseDown` of the credits' hidden counters.
+    for object in std::mem::take(&mut lobby.mouse_downs) {
+        screens::mouse_down(lobby, &mut memory, object);
+    }
 
     // Presses: mouse clicks, and Escape on a visible `BackButton`.
     let mut presses: Vec<usize> = std::mem::take(&mut clicks.0);
@@ -815,7 +1281,7 @@ fn lobby_update(
     }
     presses.retain(|&o| lobby.active_in_hierarchy(o));
     for object in presses {
-        press(lobby, &mut memory, object, &mut session, &mut source, &config, &mut next, &mut exit);
+        press(lobby, &mut memory, net, object, &mut session, &mut source, &config, &mut next, &mut exit);
     }
 
     // `SplashScreenAdvance.Update` → `NoControllers.Update` (the keyboard is always available).
@@ -831,49 +1297,38 @@ fn lobby_update(
         }
     }
 
-    // `NetworkSetup.Update`, offline with no server on the LAN.
-    if let Some(s) = lobby.named_script("NetworkSetup").cloned() {
-        if lobby.active_in_hierarchy(s.object) {
-            for field in ["joinNetworkGameButton", "showNetworkGamesButton", "connectToWiFiLabel", "connectToWiFiStarterEditionlabel"] {
-                if let Some(o) = lobby.scene.field_object(&s, field) {
-                    lobby.active[o] = false;
-                }
-            }
-            if let Some(o) = lobby.scene.field_object(&s, "noNetworkGamesFoundLabel") {
-                lobby.active[o] = true;
-            }
-            // The Steam build is the full version: no lock on "Start Network Game".
-            if let Some(lock) = lobby.scene.field_object(&s, "startNetworkGameButton").and_then(|b| lobby.scene.child(b, "Lock")) {
-                lobby.active[lock] = false;
+    // The network screens (`NetworkSetup`, `ServerList`, `LobbyEnder`, ...) and the shared
+    // settings; a client's start request reaches the host here.
+    network::update(lobby, &mut memory, net, dt);
+    if net.is_host() {
+        for kind in std::mem::take(&mut net.load_requests) {
+            if kind == sticks_net::LoadKind::Normal {
+                start_game(lobby, &mut memory, net, None, &mut session, &mut source, &config, &mut next);
             }
         }
     }
 
-    // `ControlAssignment` with the keyboard and mouse as the only input.
+    // `ControlAssignment.Start` / `Update` / `UpdateGUI`.
     if let Some(s) = lobby.named_script("ControlAssignment").cloned() {
-        if lobby.active_in_hierarchy(s.object) {
-            if move_left && memory.keyboard_slot > 0 {
-                memory.keyboard_slot -= 1;
-            }
-            if move_right && memory.keyboard_slot < 4 {
-                memory.keyboard_slot += 1;
-            }
+        let active = lobby.active_in_hierarchy(s.object);
+        if active {
+            let first_update = !lobby.assignment_was_active;
             drag_update(lobby, dt);
-            update_control_assignment(lobby, &s, &mut memory.keyboard_slot);
+            update_control_assignment(lobby, &s, &mut memory, &moves, first_update);
         }
+        lobby.assignment_was_active = active;
     }
-
-    // `LobbyEnder.Update`, offline (`NetworkPeerType.Disconnected`): only "Back".
-    for s in lobby.scene.scripts_named("LobbyEnder").cloned().collect::<Vec<_>>() {
-        for (field, on) in [("backButton", true), ("stopServerButton", false), ("disconnectButton", false)] {
-            if let Some(o) = lobby.scene.field_object(&s, field) {
-                lobby.active[o] = on;
-            }
+    network::resolve_assignments(&mut memory, net);
+    // `TeamArrangement.Start` / `Update`.
+    if let Some(s) = lobby.named_script("TeamArrangement").cloned() {
+        if lobby.active_in_hierarchy(s.object) {
+            drag_update(lobby, dt);
+            update_team_arrangement(lobby, &s, &mut memory, &player_moves);
         }
     }
 
     // `MakeGameModeConsistentWithPlayerCount.Update`.
-    let players = memory.player_count();
+    let players = network::total_players(&memory, net);
     if memory.mode == GameMode::TeamVersus && players < 3 {
         memory.mode = GameMode::Versus;
     }
@@ -956,11 +1411,79 @@ fn lobby_update(
         }
     }
 
-    // `Button.Update`: the text colour and the pressed z tween.
+    // The other screens, then the presses they simulated (`Button.SimulatePress`).
+    screens::update(lobby, &mut memory, &player_moves, mouse_player, model_delta);
+    settings_page::update(lobby, &memory);
+    for object in std::mem::take(&mut lobby.screens.simulated) {
+        press(lobby, &mut memory, net, object, &mut session, &mut source, &config, &mut next, &mut exit);
+    }
+    // The models' `Update` and animator; their transforms follow their bodies.
+    if let Some(mut figures) = lobby.figures.take() {
+        figures.frame_update(model_delta, &mut lobby.local);
+        lobby.figures = Some(figures);
+    }
+
+    // `Button.Update`: the gamepad highlight (`Select` presses the highlighted button), the text
+    // colour and the pressed z tween.
+    let select = any(|m| m.select);
+    let direction = if any(|m| m.up) {
+        Some(0)
+    } else if any(|m| m.down) {
+        Some(1)
+    } else if any(|m| m.left) {
+        Some(2)
+    } else if any(|m| m.right) {
+        Some(3)
+    } else {
+        None
+    };
+    let mut selected = Vec::new();
+    for i in 0..lobby.buttons.len() {
+        let object = lobby.buttons[i].object;
+        let active = lobby.active_in_hierarchy(object);
+        if !active && lobby.buttons[i].was_active && lobby.highlighted == Some(i) {
+            // `OnDisable`: the highlight goes up, else down, left, right.
+            lobby.highlighted = (0..4).find_map(|d| lobby.neighbour(i, d));
+        }
+        lobby.buttons[i].was_active = active;
+        if !active {
+            continue;
+        }
+        let visible = view.as_ref().is_some_and(|v| lobby.button_visible(i, v));
+        if lobby.buttons[i].was_highlighted {
+            if !visible || !gamepad_available {
+                lobby.highlighted = None;
+                if lobby.buttons[i].return_to_last_selected {
+                    lobby.buttons[i].is_default = true;
+                }
+            } else {
+                if let Some(d) = direction {
+                    lobby.highlighted = lobby.neighbour(i, d);
+                }
+                if lobby.highlighted.is_none() {
+                    lobby.highlighted = Some(i);
+                }
+            }
+        } else if lobby.buttons[i].is_default && lobby.highlighted.is_none() && visible && gamepad_available {
+            lobby.highlighted = Some(i);
+            if lobby.buttons[i].return_to_last_selected {
+                lobby.buttons[i].is_default = false;
+            }
+        }
+        let highlighted = lobby.highlighted == Some(i);
+        if highlighted && select {
+            selected.push(object);
+        }
+        lobby.buttons[i].was_highlighted = highlighted;
+    }
+    for object in selected {
+        press(lobby, &mut memory, net, object, &mut session, &mut source, &config, &mut next, &mut exit);
+    }
     for i in 0..lobby.buttons.len() {
         let (object, down, target_down, text, colour) = {
             let b = &lobby.buttons[i];
-            (b.object, b.mouse_down && b.mouse_entered, b.pressed_z, b.text, b.unhighlighted)
+            let colour = if lobby.highlighted == Some(i) { HIGHLIGHTED_TEXT } else { b.unhighlighted };
+            (b.object, b.mouse_down && b.mouse_entered, b.pressed_z, b.text, colour)
         };
         if !lobby.active_in_hierarchy(object) {
             let b = &mut lobby.buttons[i];
@@ -1019,10 +1542,15 @@ fn lobby_update(
     }
 }
 
-/// `HighScores.IsLevelUnlocked` with no scores saved: the first level, and every versus level.
-/// TODO: saved high scores and `RemoteLevelAvailability` unlock further campaign levels.
-fn level_unlocked(index: usize, mode: GameMode) -> bool {
-    index == 0 || mode != GameMode::Campaign
+/// `HighScores.IsLevelUnlocked`: the first level and every versus level; a campaign level once
+/// the one before it has a score (this session's scores: saving is not reproduced).
+/// TODO: `RemoteLevelAvailability` (network) and the starter edition.
+fn level_unlocked(index: usize, memory: &LobbyMemory, campaign_levels: &[String]) -> bool {
+    // `AllLevelUnlockCheat.Enabled` opens every level but the first check (index 0 is open).
+    if index != 0 && memory.all_levels_unlocked {
+        return true;
+    }
+    memory.high_scores.is_level_unlocked(index, memory.mode == GameMode::Campaign, campaign_levels)
 }
 
 /// `Draggable.Update`: a card held by the mouse follows it (keeping the grab offset) and lifts
@@ -1053,78 +1581,172 @@ fn drag_update(lobby: &mut Lobby, dt: f32) {
     lobby.drag = Some(d);
 }
 
-/// `ControlAssignment.Update` + `UpdateGUI` with the keyboard and mouse as the only input
-/// (`slot` 0..3 = Player 1..4, 4 = unused).
-fn update_control_assignment(lobby: &mut Lobby, s: &ScriptInstance, slot: &mut usize) {
-    // One available input, offline: the "one controller" instructions.
-    for (field, on) in [
-        ("instructionsDragAndDrop", false),
-        ("instructionsLeftAndRight", false),
-        ("instructionsBoth", false),
-        ("instructionsOneController", true),
-        ("instructionsOneControllerNetworkGame", false),
-    ] {
-        if let Some(o) = lobby.scene.field_object(s, field) {
-            lobby.active[o] = on;
+/// `ControlAssignment.GetApplicableInstructions` for the available inputs: left/right for
+/// gamepads and the keyboard, drag and drop for the mouse (and touch); both with the keyboard
+/// and mouse.
+fn applicable_instructions(available: &[InputDevice]) -> &'static str {
+    let left_and_right = !available.is_empty();
+    let drag_and_drop = available.contains(&InputDevice::KeyboardMouse);
+    match (left_and_right, drag_and_drop) {
+        (true, false) => "instructionsLeftAndRight",
+        (false, true) => "instructionsDragAndDrop",
+        _ => "instructionsBoth",
+    }
+}
+
+/// The column (0..=3 players, then the unused one) whose heading is nearest a card's world x.
+fn nearest_heading(lobby: &Lobby, card: usize, headings: &[Option<usize>]) -> Option<usize> {
+    let x = lobby.world(card).t[0];
+    let mut best: Option<(usize, f32)> = None;
+    for (column, h) in headings.iter().enumerate() {
+        let Some(h) = *h else { continue };
+        let distance = (lobby.world(h).t[0] - x).abs();
+        if best.is_none_or(|(_, d)| distance < d) {
+            best = Some((column, distance));
         }
     }
-    let headings: Vec<usize> = lobby.scene.field_objects(s, "playerHeadings").into_iter().flatten().collect();
-    let deactivated = lobby.scene.field_object(s, "deactivatedHeading");
+    best.map(|(c, _)| c)
+}
+
+/// A card at rest: `SmoothDampTowards` on, towards its place; a card switched on now starts
+/// below the screen.
+fn rest_card(lobby: &mut Lobby, card: usize, target_x: f32, target_y: f32, off_bottom_y: f32) {
+    let z = lobby.local[card][2];
+    if !lobby.active[card] {
+        lobby.local[card] = [target_x, off_bottom_y, z];
+    }
+    if let Some(m) = lobby.movers.iter_mut().find(|m| m.object == card) {
+        m.enabled = true;
+        m.target = [target_x, target_y, z];
+    }
+}
+
+/// The card the mouse is dragging, or let go of this frame (`IsBeingDragged`,
+/// `WasDroppedThisFrame`).
+fn card_drag(lobby: &Lobby, card: usize) -> Option<bool> {
+    lobby.drag.as_ref().filter(|d| d.object == card && (d.mouse_down || d.dropped)).map(|d| d.dropped)
+}
+
+/// `ControlAssignment.Start` (once), `Update` and `UpdateGUI`: one card per lobby input under
+/// the heading of the column it is in; left/right or a drop moves it.
+fn update_control_assignment(lobby: &mut Lobby, s: &ScriptInstance, memory: &mut LobbyMemory, moves: &[(InputDevice, LobbyMoves)], first_update: bool) {
+    let frames: Vec<InputFrame<InputDevice>> = moves
+        .iter()
+        .map(|&(input, m)| InputFrame { input, available: true, gamepad: matches!(input, InputDevice::Gamepad(_)), move_left: m.left, move_right: m.right })
+        .collect();
+    // `Start` waits for `LobbyInputManager.Ready`, then (the first time only) assigns the
+    // keyboard and a lone gamepad to Player 1; `StartGUI` makes the cards.
+    memory.assignment.start(&frames);
+    if lobby.input_cards.is_none() {
+        let Some(prototype) = lobby.scene.field_object(s, "prototypeInputButton") else { return };
+        let off_bottom = lobby.scene.field_object(s, "offBottomOfScreen");
+        lobby.input_cards = Some(CardColumns::start(lobby, prototype, off_bottom));
+        // One "assigned elsewhere" label per player column, under its heading (for network
+        // games), then `Destroy(prototypeAssignedElsewhereLabel)`.
+        if let Some(label) = lobby.scene.field_object(s, "prototypeAssignedElsewhereLabel") {
+            let prototype_local = lobby.local[label];
+            let headings: Vec<Option<usize>> = lobby.scene.field_objects(s, "playerHeadings");
+            let mut labels = Vec::new();
+            for heading in headings.into_iter().take(4) {
+                let x = heading.map_or(prototype_local[0], |h| lobby.local[h][0]);
+                let copy = lobby.instantiate(label, None, [x, prototype_local[1], prototype_local[2]]);
+                lobby.active[copy] = false;
+                labels.push(copy);
+            }
+            lobby.network.elsewhere_labels = labels;
+            lobby.active[label] = false;
+        }
+    }
+    let elsewhere = lobby.network.elsewhere;
+    memory.assignment.update_beside(&frames, first_update, elsewhere);
+
+    // `UpdateGUI`: one available input offline shows the one-controller instructions; in a
+    // network game with nobody else yet, the network game's.
+    let one = memory.available.len() == 1;
+    let instructions = if one && !lobby.network.online {
+        "instructionsOneController"
+    } else if one && !elsewhere.iter().any(|&e| e) {
+        "instructionsOneControllerNetworkGame"
+    } else {
+        applicable_instructions(&memory.available)
+    };
+    for field in ["instructionsDragAndDrop", "instructionsLeftAndRight", "instructionsBoth", "instructionsOneController", "instructionsOneControllerNetworkGame"] {
+        if let Some(o) = lobby.scene.field_object(s, field) {
+            lobby.active[o] = field == instructions;
+        }
+    }
+    let mut headings: Vec<Option<usize>> = lobby.scene.field_objects(s, "playerHeadings");
+    headings.truncate(4);
+    while headings.len() < 4 {
+        headings.push(None);
+    }
+    headings.push(lobby.scene.field_object(s, "deactivatedHeading"));
+    // Cards only drop on columns this machine plays.
+    let drop_headings: Vec<Option<usize>> = headings.iter().enumerate().map(|(c, h)| if c < 4 && elsewhere[c] { None } else { *h }).collect();
     // `Start`: regular = playerHeadings[0].color, drag target = playerHeadings[1].color,
     // deactivated = deactivatedHeading.color (static, taken once).
     let color_of = |lobby: &Lobby, o: Option<usize>| o.and_then(|o| lobby.text_of_object.get(&o)).map(|&t| lobby.texts[t].color);
     if lobby.heading_colors.is_none() {
-        if let (Some(regular), Some(target), Some(off)) = (color_of(lobby, headings.first().copied()), color_of(lobby, headings.get(1).copied()), color_of(lobby, deactivated)) {
+        if let (Some(regular), Some(target), Some(off)) = (color_of(lobby, headings[0]), color_of(lobby, headings[1]), color_of(lobby, headings[4])) {
             lobby.heading_colors = Some((regular, target, off));
         }
     }
-    let heading = |i: usize| if i < 4 { headings.get(i).copied() } else { deactivated };
-    let Some(button) = lobby.scene.field_object(s, "prototypeInputButton") else { return };
-    lobby.active[button] = true;
-    // The card being dragged or dropped: the nearest heading (by world x) is the target.
+    let Some(mut cards) = lobby.input_cards.take() else { return };
+    let mut should_be_active = Vec::new();
     let mut target_heading = None;
-    let dragging = lobby.drag.as_ref().filter(|d| d.object == button).map(|d| (d.mouse_down, d.dropped));
-    let mover = lobby.movers.iter().position(|m| m.object == button);
-    match dragging {
-        Some((down, dropped)) if down || dropped => {
-            if let Some(m) = mover {
-                lobby.movers[m].enabled = false;
-            }
-            let x = lobby.world(button).t[0];
-            let mut best = (usize::MAX, f32::INFINITY);
-            for column in 0..5 {
-                let Some(h) = heading(column) else { continue };
-                let distance = (lobby.world(h).t[0] - x).abs();
-                if distance < best.1 {
-                    best = (column, distance);
-                }
-            }
-            if best.0 != usize::MAX {
-                target_heading = heading(best.0);
-                if dropped && best.0 != *slot {
-                    *slot = best.0;
-                }
-            }
+    let mut dropped_handled = Vec::new();
+    for column in 0..=DEACTIVATED_COLUMN {
+        // `if (SlotAssignedToAnotherClient(i)) continue`.
+        if column < 4 && elsewhere[column] {
+            continue;
         }
-        _ => {
-            // `SmoothDampTowards` back on, towards the column's place.
-            if let (Some(m), Some(column)) = (mover, heading(*slot)) {
-                lobby.movers[m].enabled = true;
-                lobby.movers[m].target[0] = lobby.scene.objects[column].local_position[0];
+        let mut row = 0;
+        while row < memory.assignment.column(column).len() {
+            let input = memory.assignment.column(column)[row];
+            let card = cards.card(lobby, input);
+            should_be_active.push(card);
+            match card_drag(lobby, card) {
+                Some(dropped) => {
+                    if let Some(m) = lobby.movers.iter_mut().find(|m| m.object == card) {
+                        m.enabled = false;
+                    }
+                    let nearest = nearest_heading(lobby, card, &drop_headings);
+                    target_heading = nearest.and_then(|c| headings[c]);
+                    if dropped && !dropped_handled.contains(&card) {
+                        dropped_handled.push(card);
+                        if let Some(target) = nearest.filter(|&t| t != column) {
+                            memory.assignment.drop_into(input, target);
+                            // The rows below move up into its place.
+                            if let Some(text) = lobby.scene.child(card, "Text") {
+                                lobby.set_text(text, &input.label());
+                            }
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    let x = headings[column].map_or(lobby.local[card][0], |h| lobby.local[h][0]);
+                    let y = cards.row_y(row);
+                    rest_card(lobby, card, x, y, cards.off_bottom_y);
+                }
             }
+            if let Some(text) = lobby.scene.child(card, "Text") {
+                lobby.set_text(text, &input.label());
+            }
+            row += 1;
         }
     }
     if let Some(d) = lobby.drag.as_mut() {
         d.dropped = false;
     }
-    // Heading colours: the drag target; Player columns with an input regular, the rest (and the
-    // unused-controllers column) deactivated.
+    // Heading colours: the drag target; player columns with inputs regular, the rest (and the
+    // unused column) deactivated.
     if let Some((regular, drag_target, off)) = lobby.heading_colors {
-        for column in 0..5 {
-            let Some(h) = heading(column) else { continue };
+        for (column, h) in headings.iter().enumerate() {
+            let Some(h) = *h else { continue };
             let color = if Some(h) == target_heading {
                 drag_target
-            } else if column < 4 && column == *slot {
+            } else if column < DEACTIVATED_COLUMN && (elsewhere[column] || !memory.assignment.column(column).is_empty()) {
                 regular
             } else {
                 off
@@ -1132,9 +1754,90 @@ fn update_control_assignment(lobby: &mut Lobby, s: &ScriptInstance, slot: &mut u
             lobby.set_text_color(h, color);
         }
     }
-    if let Some(text) = lobby.scene.child(button, "Text") {
-        lobby.set_text(text, "Keyboard and Mouse");
+    for &(_, card) in &cards.cards {
+        lobby.active[card] = should_be_active.contains(&card);
     }
+    for (column, &label) in lobby.network.elsewhere_labels.clone().iter().enumerate() {
+        lobby.active[label] = elsewhere[column];
+    }
+    lobby.input_cards = Some(cards);
+}
+
+/// `TeamArrangement.Start` and `Update`: a card per player with controls under its team's
+/// heading; dragging it to the other heading, or the player's own left/right, moves it.
+fn update_team_arrangement(lobby: &mut Lobby, s: &ScriptInstance, memory: &mut LobbyMemory, player_moves: &[(i32, i32); sticks_sim::lobby::MAX_PLAYERS]) {
+    use sticks_sim::lobby::{MAX_PLAYERS, MAX_TEAMS};
+    if lobby.player_cards.is_none() {
+        let Some(prototype) = lobby.scene.field_object(s, "prototypePlayerButton") else { return };
+        let off_bottom = lobby.scene.field_object(s, "offBottomOfScreen");
+        let mut cards = CardColumns::start(lobby, prototype, off_bottom);
+        for player in 0..MAX_PLAYERS {
+            cards.card(lobby, player);
+        }
+        lobby.player_cards = Some(cards);
+    }
+    let Some(cards) = lobby.player_cards.take() else { return };
+    let headings: Vec<Option<usize>> = (0..MAX_TEAMS).map(|t| lobby.scene.field_objects(s, "teamHeadings").get(t).copied().flatten()).collect();
+    let mut target_heading = None;
+    for &(player, card) in &cards.cards {
+        if let Some(dropped) = card_drag(lobby, card) {
+            let nearest = nearest_heading(lobby, card, &headings);
+            target_heading = nearest.and_then(|t| headings[t]);
+            if let (true, Some(team)) = (dropped, nearest) {
+                memory.teams.move_to_team(player, team);
+            }
+        }
+        // `LobbyInputsForPlayer(i)`: each of the player's inputs moves it one team.
+        let Some(current) = memory.teams.team_of(player) else { continue };
+        let (left, right) = player_moves[player];
+        let wanted = (current as i32 - left + right).clamp(0, MAX_TEAMS as i32 - 1) as usize;
+        if wanted != current {
+            memory.teams.move_to_team(player, wanted);
+        }
+    }
+    if let Some(d) = lobby.drag.as_mut() {
+        d.dropped = false;
+    }
+    for (team, heading) in headings.iter().enumerate() {
+        let x = heading.map_or(0.0, |h| lobby.local[h][0]);
+        let mut y = cards.start_y;
+        for player in memory.teams.team(team).to_vec() {
+            let Some(&(_, card)) = cards.cards.iter().find(|(p, _)| *p == player) else { continue };
+            if !memory.is_player_active(player) && !lobby.network.elsewhere[player] {
+                lobby.active[card] = false;
+                continue;
+            }
+            let dragged = lobby.drag.as_ref().is_some_and(|d| d.object == card && d.mouse_down);
+            if !lobby.active[card] {
+                let z = lobby.local[card][2];
+                lobby.local[card] = [x, cards.off_bottom_y, z];
+                lobby.active[card] = true;
+            }
+            if let Some(m) = lobby.movers.iter_mut().find(|m| m.object == card) {
+                m.enabled = !dragged;
+                if !dragged {
+                    m.target = [x, y, m.target[2]];
+                }
+            }
+            if let Some(text) = lobby.scene.child(card, "Text") {
+                lobby.set_text(text, &LobbyMemory::player_id(player).name);
+            }
+            y -= cards.distance_y;
+        }
+    }
+    // Headings: the drag target, else `ControlAssignment.regularPlayerHeadingColor`.
+    if let Some((regular, drag_target, _)) = lobby.heading_colors {
+        for h in headings.iter().flatten() {
+            lobby.set_text_color(*h, if Some(*h) == target_heading { drag_target } else { regular });
+        }
+    }
+    let instructions = applicable_instructions(&memory.available);
+    for field in ["instructionsDragAndDrop", "instructionsLeftAndRight", "instructionsBoth"] {
+        if let Some(o) = lobby.scene.field_object(s, field) {
+            lobby.active[o] = field == instructions;
+        }
+    }
+    lobby.player_cards = Some(cards);
 }
 
 /// `LevelSelect.Awake`: remember the cards' resting places, instantiate one sliding label per
@@ -1152,7 +1855,7 @@ fn level_select_awake(lobby: &mut Lobby, s: &ScriptInstance) {
         texts
             .into_iter()
             .map(|text| {
-                labels.push(SlidingLabel { prototype: item, prototype_object: object, text, local: offscreen, velocity: [0.0; 3], target: offscreen, smooth_time });
+                labels.push(SlidingLabel { prototype: item, prototype_object: object, text, color: None, local: offscreen, velocity: [0.0; 3], target: offscreen, smooth_time });
                 labels.len() - 1
             })
             .collect()
@@ -1177,6 +1880,7 @@ fn level_select_awake(lobby: &mut Lobby, s: &ScriptInstance) {
     // Stars: remembered, then put offscreen (position and target).
     let star_offscreen = local_of(lobby, field(lobby, "difficultyStarOffscreen"));
     let stars: Vec<usize> = lobby.scene.field_objects(s, "difficultyStars").into_iter().flatten().collect();
+    let star_positions: Vec<[f32; 3]> = stars.iter().map(|&star| lobby.local[star]).collect();
     for &star in &stars {
         lobby.local[star] = star_offscreen;
         if let Some(m) = lobby.movers.iter_mut().find(|m| m.object == star) {
@@ -1216,8 +1920,10 @@ fn level_select_awake(lobby: &mut Lobby, s: &ScriptInstance) {
         number_offscreen,
         score_selected: local_of(lobby, score_prototype),
         stars,
+        star_positions,
         star_offscreen,
         high_scores: field(lobby, "highScoresButton"),
+        high_scores_enabled: local_of(lobby, field(lobby, "highScoresButton")),
         trailer,
         upgrade,
         buttons_offscreen: local_of(lobby, field(lobby, "highScoresButtonOffscreen")),
@@ -1268,7 +1974,7 @@ fn level_select_update(lobby: &mut Lobby, st: &mut LevelSelectState, memory: &mu
     if clamp(lobby.display_level) != index {
         if index != st.last_seen_index {
             lobby.display_level = index;
-        } else if level_unlocked(clamp(lobby.display_level) as usize, memory.mode) {
+        } else if level_unlocked(clamp(lobby.display_level) as usize, memory, &lobby.levels.campaign) {
             memory.level_index = clamp(lobby.display_level) as usize;
         }
     }
@@ -1354,7 +2060,7 @@ fn level_select_update(lobby: &mut Lobby, st: &mut LevelSelectState, memory: &mu
             if let (Some(image), Some(&texture)) = (st.card_images[i], images.get(level.max(0) as usize)) {
                 lobby.card_textures.insert(image, texture);
             }
-            let unlocked = level_unlocked(level.max(0) as usize, memory.mode);
+            let unlocked = level_unlocked(level.max(0) as usize, memory, &lobby.levels.campaign);
             if let Some(o) = st.overlays_standard[i] {
                 lobby.active[o] = !unlocked;
             }
@@ -1377,21 +2083,41 @@ fn level_select_update(lobby: &mut Lobby, st: &mut LevelSelectState, memory: &mu
     for (k, &label) in st.numbers.iter().enumerate() {
         lobby.labels[label].target = if k as i32 == st.current { st.number_selected } else { st.number_offscreen };
     }
-    // Trailer / upgrade buttons: Starter Edition only; stars and the high-score button: only with
-    // a saved score for that difficulty (none are saved yet).
-    // TODO: saved high scores (`HighScores.GetScoreTable`).
+    // The campaign levels' top scores for this player count and difficulty.
+    let players = memory.player_count();
+    for (j, &label) in st.scores.iter().enumerate() {
+        let level = lobby.levels.campaign.get(j).cloned().unwrap_or_default();
+        let best = memory.high_scores.table(&level, players, memory.difficulty).best().cloned();
+        let l = &mut lobby.labels[label];
+        match best {
+            Some(score) => {
+                l.text = score.value.to_string();
+                l.color = Some(if score.golden { screens::GOLDEN_SCORE } else { screens::REGULAR_SCORE });
+            }
+            None => l.text.clear(),
+        }
+    }
     let set_target = |lobby: &mut Lobby, object: Option<usize>, target: [f32; 3]| {
         if let Some(m) = object.and_then(|o| lobby.movers.iter_mut().find(|m| m.object == o)) {
             m.target = target;
         }
     };
+    // Trailer / upgrade buttons: Starter Edition only (this is the full version).
     let _ = (st.trailer_enabled, st.upgrade_enabled);
     set_target(lobby, st.trailer, st.buttons_offscreen);
     set_target(lobby, st.upgrade, st.buttons_offscreen);
-    for &star in &st.stars {
-        set_target(lobby, Some(star), st.star_offscreen);
+    // A star for each difficulty the selected campaign level has a score on; the high-score
+    // button when the selected difficulty has one.
+    let level = lobby.levels.levels(memory.mode).get(st.current.max(0) as usize).cloned().unwrap_or_default();
+    for (k, &star) in st.stars.iter().enumerate() {
+        let difficulty = k as i32 - 1;
+        let scored = memory.mode == GameMode::Campaign && !memory.high_scores.table(&level, players, difficulty).scores().is_empty();
+        let target = if scored { st.star_positions[k] } else { st.star_offscreen };
+        set_target(lobby, Some(star), target);
+        if difficulty == memory.difficulty {
+            set_target(lobby, st.high_scores, if scored { st.high_scores_enabled } else { st.buttons_offscreen });
+        }
     }
-    set_target(lobby, st.high_scores, st.buttons_offscreen);
     if let Some(label) = st.count_label {
         lobby.set_text(label, &format!("/ {count}"));
     }
@@ -1402,6 +2128,7 @@ fn level_select_update(lobby: &mut Lobby, st: &mut LevelSelectState, memory: &mu
 fn press(
     lobby: &mut Lobby,
     memory: &mut LobbyMemory,
+    net: &mut crate::net::Net,
     object: usize,
     session: &mut Session,
     source: &mut LevelSource,
@@ -1430,6 +2157,13 @@ fn press(
             _ => {}
         }
     }
+    screens::press(lobby, object);
+    if settings_page::press(lobby, memory, object) {
+        return;
+    }
+    if network::press(lobby, net, object) {
+        return;
+    }
     // Buttons other scripts subscribe to.
     let is = |lobby: &Lobby, class_name: &'static str, field: &str| lobby.field(class_name, field) == Some(object);
     // `LobbyEnder.Start`: "Back" (offline) returns to the connection screen.
@@ -1445,12 +2179,8 @@ fn press(
             lobby.activate(screen);
         }
     }
-    if is(lobby, "NetworkSetup", "startNetworkGameButton") {
-        // TODO: networking. Without a LAN connection the original flashes the Wi-Fi label.
-        warn!("network games are not implemented");
-    }
     if let Some(gm) = lobby.named_script("GameModeSelect").cloned() {
-        let players = memory.player_count();
+        let players = network::total_players(memory, net);
         let choice = [("campaignButton", GameMode::Campaign, true, "campaignCaption"), ("versusButton", GameMode::Versus, players > 1, "versusCaption"), ("teamVersusButton", GameMode::TeamVersus, players > 2, "teamVersusCaption")]
             .into_iter()
             .find(|(field, ..)| lobby.scene.field_object(&gm, field) == Some(object));
@@ -1472,32 +2202,57 @@ fn press(
         lobby.display_level = if is(lobby, "LevelSelect", "leftButton") { clamped - 1 } else { clamped + 1 };
     }
     if is(lobby, "GameSummary", "startGameButton") {
-        if memory.player_count() < 1 {
-            if let Some(err) = lobby.field("GameSummary", "errorScreen") {
-                // TODO: `LobbyError.ShowErrorAndReturnTo` message text.
-                lobby.activate(err);
-            }
-            return;
-        }
-        let levels = lobby.levels.levels(memory.mode);
-        let Some(id) = levels.get(memory.level_index).cloned() else { return };
-        lobby.set_text(lobby.scene.child(object, "Text").unwrap_or(object), "Loading\u{2026}");
-        match find_level_scene(&config.assets_dir(), &id) {
-            Some(path) => {
-                info!("starting {id} ({:?}, difficulty {}, {} player(s))", memory.mode, memory.difficulty, memory.player_count());
-                *session = Session {
-                    mode: memory.mode,
-                    difficulty: memory.difficulty,
-                    player_count: memory.player_count(),
-                    player_index: memory.keyboard_slot.min(3),
-                    teams: memory.teams.clone(),
-                };
-                source.0 = path;
-                next.set(AppState::Loading);
-            }
-            None => warn!("no scene file for level {id}"),
-        }
+        start_game(lobby, memory, net, Some(object), session, source, config, next);
     }
+}
+
+/// `GameSummary`'s start button → `LevelLoader.StartGame()`: offline the selected level loads
+/// at once; in a network game the host loads it on every machine (a client asks the host).
+#[allow(clippy::too_many_arguments)]
+fn start_game(
+    lobby: &mut Lobby,
+    memory: &mut LobbyMemory,
+    net: &mut crate::net::Net,
+    button: Option<usize>,
+    session: &mut Session,
+    source: &mut LevelSource,
+    config: &GameConfig,
+    next: &mut NextState<AppState>,
+) {
+    let players = network::total_players(memory, net);
+    if players < 1 {
+        if let (Some(err), Some(summary)) = (lobby.field("GameSummary", "errorScreen"), lobby.named_script("GameSummary").map(|s| s.object)) {
+            lobby.show_error(err, "\"You can't start a game unless there's at least one player.\" - Shakespeare probably", summary);
+        }
+        return;
+    }
+    if net.is_client() {
+        net.request_load(sticks_net::LoadKind::Normal);
+        return;
+    }
+    let levels = lobby.levels.levels(memory.mode);
+    let Some(id) = levels.get(memory.level_index).cloned() else { return };
+    if let Some(button) = button {
+        lobby.set_text(lobby.scene.child(button, "Text").unwrap_or(button), "Loading\u{2026}");
+    }
+    let Some(path) = find_level_scene(&config.assets_dir(), &id) else {
+        warn!("no scene file for level {id}");
+        return;
+    };
+    info!("starting {id} ({:?}, difficulty {}, {} player(s))", memory.mode, memory.difficulty, players);
+    if net.is_host() {
+        net.host_load(path, memory.mode, memory.difficulty, players);
+        return;
+    }
+    *session = Session {
+        mode: memory.mode,
+        difficulty: memory.difficulty,
+        player_count: players,
+        players: memory.session_players(),
+        teams: memory.teams.clone(),
+    };
+    source.0 = path;
+    next.set(AppState::Loading);
 }
 
 /// `Application.LoadLevel(name)`: the scene file of a level, relative to the export root.
@@ -1636,6 +2391,24 @@ fn queue_lobby(
             Art::Text(_) => {}
         }
     }
+    // The posed models and the achievements' progress marks (`LinesRenderer` with the "Line"
+    // sprite of the models' atlas).
+    if let Some(figures) = &lobby.figures {
+        let geometries = figures.renderers(|root| lobby.scene.active_in_hierarchy(root, &lobby.active), light.for_shadows);
+        for g in geometries {
+            if view.may_see(g.bounds_center(), extent(&g)) {
+                queue.0.push_frame(figures.art.texture, g);
+            }
+        }
+        for (renderer, lines) in &lobby.screens.goal_marks {
+            let visual = sticks_sim::visual::lines_with_shadows(lines, *renderer, 0.0, light.for_shadows);
+            for g in visual.renderers(&figures.art.art).into_iter().take(1) {
+                if !g.is_empty() {
+                    queue.0.push_frame(figures.art.texture, g);
+                }
+            }
+        }
+    }
     // `LevelSelect`'s sliding labels (children of their prototype's parent).
     for k in 0..lobby.labels.len() {
         let parent = lobby.scene.objects[lobby.labels[k].prototype_object].parent;
@@ -1658,13 +2431,13 @@ fn label_geometry(lobby: &mut Lobby, k: usize, light: Option<SimVec3>) -> Vec<(u
     if label.text.is_empty() {
         return out;
     }
-    let (item, object, text, local) = (label.prototype, label.prototype_object, label.text.clone(), label.local);
+    let (item, object, text, local, color_override) = (label.prototype, label.prototype_object, label.text.clone(), label.local, label.color);
     let o = &lobby.scene.objects[object];
     let parent = o.parent.map_or(Affine::IDENTITY, |p| lobby.world(p));
     let r = o.local_rotation;
     let world = parent.mul(&Affine::from_trs(local, (r[0], r[1], r[2], r[3]), o.local_scale));
     let caster = &lobby.texts[item];
-    let (font_guid, layout, color, color2, gradient) = (caster.font.clone(), caster.layout.clone(), caster.color, caster.color2, caster.use_gradient);
+    let (font_guid, layout, color, color2, gradient) = (caster.font.clone(), caster.layout.clone(), color_override.unwrap_or(caster.color), caster.color2, caster.use_gradient);
     let shadow = lobby.texts.iter().find_map(|t| t.shadow_of.as_ref().filter(|s| s.0 == item).map(|s| (s.1.clone(), s.2)));
     let Some(&texture) = lobby.font_textures.get(&font_guid) else { return out };
     let Some(font) = lobby.fonts.get(&font_guid) else { return out };

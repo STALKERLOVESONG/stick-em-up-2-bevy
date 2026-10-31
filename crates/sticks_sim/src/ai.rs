@@ -297,6 +297,126 @@ impl Brain {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Emerging
+// ---------------------------------------------------------------------------------------------
+
+/// `Emerge.characterControl.z` while hidden and once out.
+pub const EMERGE_HIDDEN_Z: f32 = 0.0;
+pub const EMERGE_DONE_Z: f32 = -0.1;
+/// The layer an emerging enemy's tree is on until it is out (`Player.SetLayer(root, 25)`).
+pub const EMERGE_LAYER: u8 = 25;
+
+/// Where an `Emerge` coroutine is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EmergePhase {
+    /// `while (!activationTrigger.Triggered) yield return null`.
+    Waiting,
+    /// Walking towards `target_x`, aiming (`fireAtFirstTarget.Fire()` then `input.Fire = false`).
+    Moving { target_x: f32, going_right: bool },
+    /// `yield return postEmergeWait`.
+    Settling { remaining: f32 },
+    Done,
+}
+
+/// What [`Emergence::update`] tells the game to do with the character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmergeEvent {
+    None,
+    /// Out: `characterControl.z = -0.1` and the root's original layer again.
+    Emerged,
+    /// The behaviours it held back run again.
+    Completed,
+}
+
+/// `Emerge` (started in `Start`): the enemy's `FireAtFirstTarget`, the behaviours in
+/// `unsubsumeOnCompletion` and those in `enableOnCompletion` are held back until it has walked
+/// `point_x` out from behind the scenery.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Emergence {
+    pub point_x: f32,
+    pub post_wait: f32,
+    /// `FireAndMoveIfNecessary` is in `unsubsumeOnCompletion`.
+    pub holds_fire_and_move: bool,
+    /// `MoveToFirstTarget` is in `unsubsumeOnCompletion`.
+    pub holds_move: bool,
+    /// `Duck` is in `enableOnCompletion` (disabled until done, which clears the processor's duck).
+    pub disables_duck: bool,
+    pub phase: EmergePhase,
+}
+
+impl Emergence {
+    pub fn of(spec: &unity_data::level::EmergeSpec) -> Emergence {
+        let listed = |list: &[String], class_name: &str| list.iter().any(|c| c == class_name);
+        Emergence {
+            point_x: spec.point_x,
+            post_wait: spec.post_emerge_wait_time,
+            holds_fire_and_move: listed(&spec.unsubsume_on_completion, "FireAndMoveIfNecessary"),
+            holds_move: listed(&spec.unsubsume_on_completion, "MoveToFirstTarget"),
+            disables_duck: listed(&spec.enable_on_completion, "Duck"),
+            phase: EmergePhase::Waiting,
+        }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.phase == EmergePhase::Done
+    }
+
+    /// The behaviours that run their own `Update` while emerging: `FireAtFirstTarget` is held,
+    /// the listed ones too, and `MoveToFirstTarget` stays subsumed by a `FireAndMoveIfNecessary`.
+    pub fn restricted(&self, brain: &Brain) -> Brain {
+        if self.is_done() {
+            return *brain;
+        }
+        Brain {
+            fire_at_first_target: false,
+            move_to_first_target: brain.move_to_first_target && !brain.fire_and_move_if_necessary && !self.holds_move,
+            fire_and_move_if_necessary: brain.fire_and_move_if_necessary && !self.holds_fire_and_move,
+            duck: brain.duck && !self.disables_duck,
+        }
+    }
+
+    /// One step of the coroutine (after the frame's `Update`s): `triggered` is the activation
+    /// trigger's state, `controller_x` the controller object's x; `aim` is
+    /// `fireAtFirstTarget.Fire()`.
+    pub fn update(&mut self, input: &mut EnemyInput, triggered: bool, controller_x: f32, delta: f32, aim: impl FnOnce(&mut EnemyInput)) -> EmergeEvent {
+        if self.phase == EmergePhase::Waiting {
+            if !triggered {
+                return EmergeEvent::None;
+            }
+            input.movement = sign(self.point_x);
+            self.phase = EmergePhase::Moving { target_x: controller_x + self.point_x, going_right: input.movement >= 0.0 };
+        }
+        match self.phase {
+            EmergePhase::Moving { target_x, going_right } => {
+                let delta_x = target_x - controller_x;
+                if going_right ^ (delta_x >= 0.0) {
+                    input.movement = 0.0;
+                    self.phase = EmergePhase::Settling { remaining: self.post_wait };
+                    return EmergeEvent::Emerged;
+                }
+                aim(input);
+                input.fire = false;
+                EmergeEvent::None
+            }
+            EmergePhase::Settling { remaining } => {
+                let remaining = remaining - delta;
+                if remaining <= 0.0 {
+                    self.phase = EmergePhase::Done;
+                    if self.disables_duck {
+                        input.duck = true;
+                    }
+                    EmergeEvent::Completed
+                } else {
+                    self.phase = EmergePhase::Settling { remaining };
+                    EmergeEvent::None
+                }
+            }
+            EmergePhase::Waiting | EmergePhase::Done => EmergeEvent::None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Off-screen deactivation
 // ---------------------------------------------------------------------------------------------
 
@@ -340,6 +460,34 @@ impl OffScreenSleep {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emerging_enemy_waits_walks_out_then_fights() {
+        let spec = unity_data::level::EmergeSpec {
+            point_x: -3.0,
+            trigger_object: None,
+            post_emerge_wait_time: 0.4,
+            unsubsume_on_completion: vec!["FireAndMoveIfNecessary".into()],
+            enable_on_completion: vec![],
+        };
+        let mut e = Emergence::of(&spec);
+        let brain = Brain { fire_at_first_target: true, move_to_first_target: true, fire_and_move_if_necessary: true, duck: false };
+        let held = e.restricted(&brain);
+        assert!(!held.fire_at_first_target && !held.fire_and_move_if_necessary && !held.move_to_first_target);
+        let mut input = EnemyInput::default();
+        assert_eq!(e.update(&mut input, false, 10.0, 0.1, |_| {}), EmergeEvent::None);
+        assert_eq!(input.movement, 0.0);
+        assert_eq!(e.update(&mut input, true, 10.0, 0.1, |i| i.fire = true), EmergeEvent::None);
+        assert_eq!(input.movement, -1.0);
+        assert!(!input.fire, "aims but never fires on the way out");
+        assert_eq!(e.update(&mut input, true, 8.0, 0.1, |_| {}), EmergeEvent::None);
+        assert_eq!(e.update(&mut input, true, 6.9, 0.1, |_| {}), EmergeEvent::Emerged);
+        assert_eq!(input.movement, 0.0);
+        // 0.4 s later (four or five 0.1 s frames, depending on rounding).
+        let frames = (0..6).position(|_| e.update(&mut input, true, 6.9, 0.1, |_| {}) == EmergeEvent::Completed);
+        assert!(matches!(frames, Some(3 | 4)), "{frames:?}");
+        assert_eq!(e.restricted(&brain), brain);
+    }
 
     fn target_at(x: f32, y: f32) -> Target {
         Target { index: 0, position: Vec3::new(x, y, -0.1), distance_sqr: x * x + y * y }

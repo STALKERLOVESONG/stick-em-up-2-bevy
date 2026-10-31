@@ -14,7 +14,8 @@ use sticks_sim::aim::{AimedWeapon, PosedCharacter};
 use sticks_sim::explosion::{Anchor, CollisionData};
 use sticks_sim::weapons::{Hit, Launcher, Loadout, Shot, ShotTarget, corrected_aim, difficulty_modified};
 use unity_compat::{Quat as SimQuat, Vec2 as SimVec2, Vec3 as SimVec3};
-use unity_data::projectile::{ContactExplosion, ProjectileSpec};
+use sticks_sim::melee::{Swing, SwingTarget};
+use unity_data::projectile::{ContactExplosion, MeleeSpec, ProjectileSpec};
 
 use crate::effects::{AnchorRef, Anchors, EffectLibrary, FadeOutSounds, PlaySound, ProjectileExploded, avatar_anchor, prepooled, trail_for};
 use crate::enemy::Enemy;
@@ -54,6 +55,25 @@ impl Armament {
         self.loadout.weapons()
     }
 
+    /// Development hook (not in the original): every rig weapon, whatever the level allows.
+    pub(crate) fn unlock_all_weapons(&mut self) {
+        let count = self.launchers.len();
+        self.loadout.unlock_all(count);
+    }
+
+    /// Development hook (not in the original): the launchers, one per rig weapon.
+    pub(crate) fn launchers_mut(&mut self) -> &mut [Launcher] {
+        &mut self.launchers
+    }
+
+    /// `SetWeapon` from the owner of a networked character: equip `weapon` if the loadout holds
+    /// it and something else is up.
+    pub(crate) fn select_weapon(&mut self, weapon: usize) {
+        if self.equipped() != Some(weapon) {
+            self.loadout.select(weapon);
+        }
+    }
+
     /// GUID of the prefab rig weapon `weapon` launches.
     pub fn projectile(&self, weapon: usize) -> &str {
         &self.projectiles[weapon]
@@ -86,6 +106,21 @@ pub struct AimPivot(pub SimVec2);
 /// Projectile prefabs by GUID, loaded once with the character rig.
 #[derive(Resource)]
 pub struct ProjectileLibrary(pub HashMap<String, Arc<ProjectileSpec>>);
+
+/// The melee effects rig weapons launch instead of a projectile (the Sword's "Sword Swish").
+#[derive(Resource, Default)]
+pub struct MeleeLibrary(pub HashMap<String, Arc<MeleeSpec>>);
+
+/// A melee effect following its launcher (`sticks_sim::melee`).
+#[derive(Component)]
+pub struct MeleeSwing {
+    pub swing: Swing,
+    /// The avatar whose launch point it follows.
+    pub owner: Entity,
+    pub launch_point: usize,
+    /// `DamageOtherOnCollision.responsiblePlayer`.
+    pub responsible: Option<Entity>,
+}
 
 /// A projectile in flight.
 #[derive(Component)]
@@ -183,11 +218,12 @@ impl Plugin for WeaponPlugin {
         // `CharacterControl2D.Start` runs before the character's first `Update` (the enemy AI
         // reads the equipped weapon from its first frame on).
         app.init_resource::<ProjectilePools>()
+        .init_resource::<MeleeLibrary>()
         .add_systems(OnEnter(AppState::InGame), |mut pools: ResMut<ProjectilePools>| pools.0.clear())
         .add_systems(Update, attach_armaments.in_set(FrameSet::RoleInput))
         .add_systems(
             Update,
-            (despawn_exploded_projectiles, reload_on_respawn, aim_and_pose, switch_weapons, fire_weapons, start_projectiles, expire_projectiles, remember_rotations)
+            (despawn_exploded_projectiles, reload_on_respawn, aim_and_pose, switch_weapons, fire_weapons, start_projectiles, expire_projectiles, expire_swings, remember_rotations)
                 .chain()
                 .in_set(FrameSet::Characters)
                 .after(crate::player::update_characters),
@@ -195,7 +231,7 @@ impl Plugin for WeaponPlugin {
         .add_systems(Update, resolve_pending_contacts.in_set(FrameSet::Present))
         .add_systems(
             Update,
-            step_projectiles.in_set(FrameSet::FixedSteps).after(crate::player::run_fixed_steps).before(crate::life::apply_damage),
+            (step_swings, step_projectiles).chain().in_set(FrameSet::FixedSteps).after(crate::player::run_fixed_steps).before(crate::life::apply_damage),
         );
     }
 }
@@ -263,11 +299,11 @@ fn reload_on_respawn(mut notices: MessageReader<LifeNotice>, mut avatars: Query<
 /// `CorrectAndSetAim` and `OnAnimatorIK`: pose the rig for this frame's animation and aim.
 fn aim_and_pose(
     art: Option<Res<ManArt>>,
-    mut avatars: Query<(&Avatar, &Controls, &Mortal, &mut Armament, &mut Posed, &mut AimPivot)>,
+    mut avatars: Query<(&Avatar, &Controls, &Mortal, &mut Armament, &mut Posed, &mut AimPivot, Option<&crate::enemy::DrawZ>)>,
 ) {
     let Some(art) = art else { return };
     let model = art.model();
-    for (avatar, controls, mortal, mut armament, mut posed, mut pivot) in &mut avatars {
+    for (avatar, controls, mortal, mut armament, mut posed, mut pivot, draw_z) in &mut avatars {
         if !mortal.avatar_active() {
             continue;
         }
@@ -277,6 +313,10 @@ fn aim_and_pose(
         let equipped = armament.equipped();
         let weapon = equipped.map(|weapon| AimedWeapon { weapon, aim, face_right });
         posed.0 = model.pose_character(&avatar.animator.pose(), avatar.position(), face_right, weapon);
+        // `CharacterControl2D.z` (an emerging enemy waits behind the scenery at 0).
+        if let Some(z) = draw_z {
+            posed.0.placement.position.z = z.0;
+        }
         if let Some(bone) = equipped.and_then(|weapon| model.rig().weapons[weapon].aim_pivot) {
             let p = posed.world_position(bone);
             pivot.0 = SimVec2::new(p.x, p.y);
@@ -318,18 +358,36 @@ fn fire_weapons(
     collision: Res<Collision>,
     art: Option<Res<ManArt>>,
     library: Option<Res<ProjectileLibrary>>,
-    mut avatars: Query<(&Controls, &Mortal, &mut Armament, &Posed, Option<&Team>, Option<&ControlledBy>)>,
+    melee: Res<MeleeLibrary>,
+    mut avatars: Query<(Entity, &Controls, &Mortal, &mut Armament, &Posed, Option<&Team>, Option<&ControlledBy>)>,
     mut sounds: MessageWriter<PlaySound>,
 ) {
     let (Some(art), Some(library)) = (art, library) else { return };
     let weapons = &art.model().rig().weapons;
     let delta = clock.stepper.frame().delta;
-    for (controls, mortal, mut armament, posed, team, controlled_by) in &mut avatars {
+    for (entity, controls, mortal, mut armament, posed, team, controlled_by) in &mut avatars {
         if !mortal.avatar_active() {
             continue;
         }
         let Some(equipped) = armament.equipped() else { continue };
         let weapon = &weapons[equipped];
+        // A melee weapon: the launcher spawns its effect at the launch point.
+        if let (Some(spec), Some(launch_point)) = (melee.0.get(armament.projectile(equipped)), weapon.launch_point) {
+            let Some(_launch) = armament.launchers[equipped].update(controls.fire, clock.time, delta) else { continue };
+            let muzzle = posed.world_position(launch_point);
+            let damage = match &spec.damage_scaling {
+                Some(scaling) if session.mode == GameMode::Campaign => {
+                    difficulty_modified(spec.damage, &scaling.amount, scaling.affected_by_player_count, session.player_count as i32, session.difficulty)
+                }
+                _ => spec.damage,
+            };
+            let swing = Swing::new(spec, damage, SimVec2::new(muzzle.x, muzzle.y), controls.aim, team.map_or(0, |t| t.0));
+            commands.spawn((Name::new(spec.name.clone()), MeleeSwing { swing, owner: entity, launch_point, responsible: controlled_by.map(|c| c.0) }));
+            if !weapon.firing_sound.is_empty() {
+                sounds.write(PlaySound { group: weapon.firing_sound.clone(), at: Some(SimVec3::new(muzzle.x, muzzle.y, muzzle.z)), owner: None });
+            }
+            continue;
+        }
         let (Some(spec), Some(launch_point)) = (library.0.get(armament.projectile(equipped)), weapon.launch_point) else { continue };
         let Some(launch) = armament.launchers[equipped].update(controls.fire, clock.time, delta) else { continue };
         let muzzle = posed.world_position(launch_point);
@@ -402,7 +460,7 @@ fn despawn_exploded_projectiles(
             exploded.frame_seen = true;
             continue;
         }
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
         pools.release(&projectile.spec.guid);
         fades.write(FadeOutSounds { owner: entity });
     }
@@ -486,7 +544,7 @@ pub(crate) fn expire_projectiles(
         if projectile.spec.explodes_on_expiration {
             explode(&mut projectile, entity, None, None, delta, &mut exploded);
         } else {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
             pools.release(&projectile.spec.guid);
             fades.write(FadeOutSounds { owner: entity });
         }
@@ -514,6 +572,7 @@ pub(crate) fn step_projectiles(
     helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
     mut helicopter_hits: MessageWriter<crate::helicopter::HelicopterHit>,
     mut exploded: MessageWriter<ProjectileExploded>,
+    swings: Query<&MeleeSwing>,
 ) {
     if projectiles.is_empty() || clock.steps.is_empty() {
         return;
@@ -531,6 +590,15 @@ pub(crate) fn step_projectiles(
             }
             if projectile.pending.is_some_and(|p| p.hold) {
                 continue;
+            }
+            // A sword's deflector: the projectile bounces off and changes sides instead of
+            // exploding.
+            for swing in &swings {
+                if swing.swing.deflect(&mut projectile.shot, &collision.rules) {
+                    if swing.responsible.is_some() {
+                        projectile.responsible = swing.responsible;
+                    }
+                }
             }
             let Some(hit) = projectile.shot.fixed_step(&collision.world, &collision.rules, &targets, dt) else { continue };
             let amount = projectile.shot.damage;
@@ -561,6 +629,51 @@ pub(crate) fn step_projectiles(
                 ContactExplosion::UnlessOtherIsDestroyed => projectile.pending = Some(PendingContact { anchor, collided_with, hold: true }),
                 ContactExplosion::Never => {}
             }
+        }
+    }
+}
+
+/// `FollowProjectileLauncher.FixedUpdate` and the effect's `OnCollisionEnter2D`s: every physics
+/// step the swing moves to its launcher's launch point and damages each body it starts touching
+/// (characters and helicopters on layers its layer collides with).
+pub(crate) fn step_swings(
+    clock: Res<FrameClock>,
+    collision: Res<Collision>,
+    mut swings: Query<&mut MeleeSwing>,
+    bodies: Query<(Entity, &Avatar, &Mortal, Option<&Posed>)>,
+    helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
+    mut damage: MessageWriter<Damage>,
+    mut helicopter_hits: MessageWriter<crate::helicopter::HelicopterHit>,
+) {
+    if swings.is_empty() || clock.steps.is_empty() {
+        return;
+    }
+    let active: Vec<(Entity, &Avatar)> = bodies.iter().filter(|(_, _, mortal, _)| mortal.avatar_active()).map(|(e, a, _, _)| (e, a)).collect();
+    let mut targets: Vec<SwingTarget<'_>> = active.iter().map(|(e, a)| SwingTarget { key: e.to_bits(), position: a.position(), shape: &a.body.shape, layer: a.body.layer }).collect();
+    let helis: Vec<(Entity, &crate::helicopter::Helicopter)> = helicopters.iter().filter(|(_, h)| h.is_target()).collect();
+    targets.extend(helis.iter().map(|(e, h)| SwingTarget { key: e.to_bits(), position: h.body.position, shape: &h.shape, layer: h.layer }));
+    for mut swing in &mut swings {
+        let to = bodies.get(swing.owner).ok().and_then(|(_, _, _, posed)| posed).map(|p| p.world_position(swing.launch_point));
+        for &dt in &clock.steps {
+            let at = to.map_or(swing.swing.position, |p| SimVec2::new(p.x, p.y));
+            let amount = swing.swing.damage;
+            for key in swing.swing.fixed_step(at, dt, &targets, &collision.rules) {
+                if let Some(&(heli, _)) = helis.iter().find(|(e, _)| e.to_bits() == key) {
+                    helicopter_hits.write(crate::helicopter::HelicopterHit { helicopter: heli, amount });
+                } else if let Some(&(target, _)) = active.iter().find(|(e, _)| e.to_bits() == key) {
+                    damage.write(Damage { target, amount, on_kill: OnKill::Nothing, responsible: swing.responsible });
+                }
+            }
+        }
+    }
+}
+
+/// `SpawnExpiration.Update` → `DespawnOnSpawnExpiration`.
+fn expire_swings(mut commands: Commands, clock: Res<FrameClock>, mut swings: Query<(Entity, &mut MeleeSwing)>) {
+    let delta = clock.stepper.frame().delta;
+    for (entity, mut swing) in &mut swings {
+        if swing.swing.update(delta) {
+            commands.entity(entity).try_despawn();
         }
     }
 }

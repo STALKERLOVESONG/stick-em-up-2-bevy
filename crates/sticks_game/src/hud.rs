@@ -13,8 +13,17 @@
 //!   background with a `tk2dClippedSprite` "Bar" child), `VersusScoreUI` and
 //!   `WeaponIndicatorUI`. `Player.SetUp` activates the player's object and sets them up.
 //!
-//! TODO: the Versus score label (a `tk2dTextMesh`) and the off-screen `Pointers` are not drawn;
-//! only the local player has a HUD ("Player N" for its slot; one local player).
+//! * The rest of `In-Game UI` (pause menus, tips, end of level, game over) is drawn from the
+//!   same scene and camera: its `tk2dSlicedSprite` panels and button backgrounds
+//!   (`draw::sliced_sprite_geometry`) and its `tk2dTextMesh`es; what those screens do is
+//!   `ingame_ui`.
+//!
+//! * Every player has its `Player N` (Team Versus: its place grouped by team), its
+//!   `VersusScoreUI` frags label in Versus, and in Team Versus the `Team Info` panels
+//!   (`TeamVersusScoreUI`) show each team's frags.
+//!
+//! TODO: the off-screen `Pointers` (`Pointer.Get(PlayerIndex)`, coloured in `Player.SetUp`) are
+//! not drawn.
 
 use std::collections::HashMap;
 
@@ -23,7 +32,9 @@ use bevy::ecs::entity_disabling::Disabled;
 use bevy::camera::{ClearColorConfig, ScalingMode};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use sticks_sim::draw::{DrawQueue, clipped_sprite_geometry, sprite_geometry};
+use sticks_sim::draw::{DrawQueue, clipped_sprite_geometry, sliced_sprite_geometry, sprite_geometry};
+use sticks_sim::text::{TextLayout, format_text, place, text_local_geometry};
+use unity_data::fonts::FontLibrary;
 use unity_compat::{Vec3 as SimVec3, mathf};
 use unity_data::interactive::{InteractiveScene, load_interactive_scene};
 use unity_data::math::Affine;
@@ -35,7 +46,7 @@ use crate::enemy::Enemy;
 use crate::figure::{ManArt, Palette};
 use crate::helicopter::Helicopter;
 use crate::vehicles::Piloting;
-use crate::life::{Mortal, PlayerLives};
+use crate::life::{Mortal, PlayerLives, PlayerScore};
 use crate::player::{ControlledBy, FrameClock, Player};
 use crate::state::{AppState, GameMode, Session};
 use crate::unity_render::{QueueSet, TextureLoad, UnityLitMaterial, UnityTextures, upload_runs};
@@ -43,7 +54,8 @@ use crate::weapon::Armament;
 
 /// The Bevy render layer standing for Unity layer 5 ("UI"), the only one the UI camera draws.
 const UI_LAYER: usize = 1;
-/// `tk2d/BlendVertexColor` combines `texture * primary` without doubling.
+/// `tk2d/BlendVertexColor` combines `texture * primary` without doubling (the UI atlas and the
+/// UI font share that material).
 const UNLIT_TINT: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
 /// `HealthUI.SetUp`: the background is the bar colour × 107/180.
 const BACKGROUND_BRIGHTNESS: f32 = 107.0 / 180.0;
@@ -85,8 +97,11 @@ struct Fade {
     start_alpha: f32,
 }
 
-/// `HealthUI` / `WeaponIndicatorUI` state of the local player's `Player Info` object.
+/// `HealthUI` / `VersusScoreUI` / `WeaponIndicatorUI` state of a player's `Player Info`
+/// object.
 struct PlayerSlot {
+    /// The `Player N` object.
+    info: usize,
     bars: Vec<usize>,
     /// The bar the current life is shown in (`currentBar`).
     current: usize,
@@ -98,22 +113,70 @@ struct PlayerSlot {
     enabled_color: [f32; 4],
     disabled_color: [f32; 4],
     weapon_seen: Option<Option<String>>,
+    /// `VersusScoreUI.label` (Versus only) and `lastFrags`.
+    score_label: Option<usize>,
+    frags_seen: Option<i32>,
+}
+
+/// A `tk2dSlicedSprite` of `In-Game UI`.
+pub(crate) struct HudSliced {
+    pub object: usize,
+    def: SpriteDef,
+    texture: u32,
+    scale: [f32; 3],
+    pub dimensions: [f32; 2],
+    borders: [f32; 4],
+    anchor: i64,
+    border_only: bool,
+    /// `tk2dSlicedSprite.color` (fades change its alpha).
+    pub color: [f32; 4],
+}
+
+/// A `tk2dTextMesh` of `In-Game UI`.
+pub(crate) struct HudText {
+    pub object: usize,
+    font: String,
+    pub text: String,
+    pub color: [f32; 4],
+    color2: [f32; 4],
+    use_gradient: bool,
+    layout: TextLayout,
 }
 
 #[derive(Resource)]
-struct HudScene {
-    scene: InteractiveScene,
-    active: Vec<bool>,
-    local_position: Vec<[f32; 3]>,
-    local_scale: Vec<[f32; 3]>,
+pub(crate) struct HudScene {
+    pub scene: InteractiveScene,
+    pub active: Vec<bool>,
+    pub local_position: Vec<[f32; 3]>,
+    pub local_scale: Vec<[f32; 3]>,
     sprites: Vec<HudSprite>,
     sprite_of: HashMap<usize, usize>,
+    pub sliced: Vec<HudSliced>,
+    pub sliced_of: HashMap<usize, usize>,
+    pub texts: Vec<HudText>,
+    pub text_of: HashMap<usize, usize>,
+    fonts: FontLibrary,
+    font_textures: HashMap<String, u32>,
+    /// `TagManager` sorting layers (unique ids in draw order).
+    sorting_layers: Vec<i64>,
     player_info: usize,
-    /// `ViewportAnchor`s under `Player Info`: object and viewport point.
+    /// `In-Game UI` (menus and end-of-level screens).
+    pub in_game_ui: Option<usize>,
+    /// `ViewportAnchor`s under `Player Info` and `In-Game UI`: object and viewport point.
     anchors: Vec<(usize, [f32; 2])>,
+    /// Objects with `ScaleWithAspectRatioToMaintainWidthFraction`.
+    scalers: Vec<usize>,
     /// Game-space position of the `UI Camera`.
-    camera: [f32; 3],
-    slot: Option<PlayerSlot>,
+    pub camera: [f32; 3],
+    /// This frame's layout: half the orthographic height, the aspect ratio and the anchored
+    /// world positions (`ViewportAnchor.Update`).
+    pub ortho: f32,
+    pub aspect: f32,
+    anchored: HashMap<usize, [f32; 3]>,
+    /// Set-up `Player Info`s by player index.
+    slots: HashMap<usize, PlayerSlot>,
+    /// `Team Info` (Team Versus team frags).
+    team_info: Option<usize>,
     queue: DrawQueue,
     pool: Vec<(Entity, Handle<Mesh>)>,
 }
@@ -146,6 +209,45 @@ impl HudScene {
         }
     }
 
+    /// Every object under `root` (itself included).
+    pub fn subtree(&self, root: usize) -> Vec<usize> {
+        self.descendants(root)
+    }
+
+    /// `tk2dTextMesh.text` of the text on `object`.
+    pub fn set_text(&mut self, object: usize, text: &str) {
+        if let Some(&t) = self.text_of.get(&object) {
+            if self.texts[t].text != text {
+                self.texts[t].text = text.to_owned();
+            }
+        }
+    }
+
+    pub fn text_color(&self, object: usize) -> Option<[f32; 4]> {
+        self.text_of.get(&object).map(|&t| self.texts[t].color)
+    }
+
+    pub fn set_text_color(&mut self, object: usize, color: [f32; 4]) {
+        if let Some(&t) = self.text_of.get(&object) {
+            self.texts[t].color = color;
+        }
+    }
+
+    pub fn active_in_hierarchy(&self, object: usize) -> bool {
+        self.scene.active_in_hierarchy(object, &self.active)
+    }
+
+    /// The renderer's sorting layer rank and order (Unity sorts by them before depth).
+    fn sorting_of(&self, object: usize) -> (i32, i32) {
+        let (layer, order) = self.scene.sorting.get(&object).copied().unwrap_or((0, 0));
+        (unity_data::settings::sorting_rank(&self.sorting_layers, layer), order as i32)
+    }
+
+    /// The object's world transform this frame (after this frame's layout).
+    pub fn world(&self, object: usize) -> Affine {
+        self.world_of(object, &self.anchored, &mut HashMap::new())
+    }
+
     /// World transform from the run-time local positions and scales; `anchored` objects have
     /// their world position set (`ViewportAnchor`).
     fn world_of(&self, object: usize, anchored: &HashMap<usize, [f32; 3]>, cache: &mut HashMap<usize, Affine>) -> Affine {
@@ -166,18 +268,23 @@ impl HudScene {
 
 pub struct HudPlugin;
 
+/// [`layout_hud`]: the UI's world transforms for this frame (the menus pick against them).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HudLayout;
+
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::InGame), load_hud)
             .add_systems(OnExit(AppState::InGame), |mut commands: Commands| commands.remove_resource::<HudScene>())
             .add_systems(Update, update_hud.in_set(FrameSet::Present).run_if(resource_exists::<HudScene>))
+            .add_systems(Update, layout_hud.in_set(HudLayout).after(FrameSet::Present).before(QueueSet::Draw).run_if(in_state(AppState::InGame)).run_if(resource_exists::<HudScene>))
             .add_systems(Update, draw_hud.in_set(QueueSet::Draw).run_if(resource_exists::<HudScene>));
     }
 }
 
 /// Load the Permanent System scene's `Player Info` and spawn the UI camera.
 #[allow(clippy::too_many_arguments)]
-fn load_hud(
+pub(crate) fn load_hud(
     mut commands: Commands,
     config: Res<GameConfig>,
     asset_server: Res<AssetServer>,
@@ -207,6 +314,8 @@ fn load_hud(
         error!("Permanent System.unity has no Player Info / UI Camera; no HUD");
         return;
     };
+    let in_game_ui = find("In-Game UI");
+    let team_info = find("Team Info");
     let assets_dir = config.assets_dir();
     let mut load = TextureLoad::new(&assets_dir, &asset_server, &mut images, &mut materials);
     let mut libraries: HashMap<String, SpriteLibrary> = HashMap::new();
@@ -216,15 +325,35 @@ fn load_hud(
         local_scale: scene.objects.iter().map(|o| o.local_scale).collect(),
         sprites: Vec::new(),
         sprite_of: HashMap::new(),
+        sliced: Vec::new(),
+        sliced_of: HashMap::new(),
+        texts: Vec::new(),
+        text_of: HashMap::new(),
+        fonts: FontLibrary::new(&assets_dir),
+        font_textures: HashMap::new(),
+        sorting_layers: std::fs::read_to_string(config.export_root.join("ProjectSettings/TagManager.asset"))
+            .map(|t| unity_data::settings::parse_sorting_layers(&t))
+            .unwrap_or_default(),
         player_info,
+        in_game_ui,
         anchors: Vec::new(),
+        scalers: Vec::new(),
         camera: scene.objects[ui_camera].world.t,
-        slot: None,
+        ortho: 1.0,
+        aspect: STANDARD_ASPECT_RATIO,
+        anchored: HashMap::new(),
+        slots: HashMap::new(),
+        team_info,
         queue: DrawQueue::default(),
         pool: Vec::new(),
         scene,
     };
-    let subtree = hud.descendants(player_info);
+    let mut subtree = hud.descendants(player_info);
+    if let Some(t) = team_info {
+        subtree.extend(hud.descendants(t));
+    }
+    let menus = in_game_ui.map(|root| hud.descendants(root)).unwrap_or_default();
+    subtree.extend(menus.iter().copied());
     for sprite in &hud.scene.sprites {
         let Some(object) = hud.scene.object_of(sprite.object) else { continue };
         if !subtree.contains(&object) {
@@ -254,13 +383,85 @@ fn load_hud(
             clip: sprite.clipped,
         });
     }
+    // `In-Game UI`'s sliced panels and its texts.
+    for sliced in &hud.scene.sliced {
+        let Some(object) = hud.scene.object_of(sliced.object) else { continue };
+        if !menus.contains(&object) {
+            continue;
+        }
+        if !libraries.contains_key(&sliced.collection) {
+            match SpriteLibrary::load(&assets_dir, &sliced.collection) {
+                Ok(lib) => {
+                    libraries.insert(sliced.collection.clone(), lib);
+                }
+                Err(e) => {
+                    warn!("UI sprite collection {}: {e}", sliced.collection);
+                    continue;
+                }
+            }
+        }
+        let lib = &libraries[&sliced.collection];
+        let Some(def) = lib.collection.sprites.get(sliced.sprite_id) else { continue };
+        let Some(path) = lib.texture_of(def) else { continue };
+        hud.sliced_of.insert(object, hud.sliced.len());
+        hud.sliced.push(HudSliced {
+            object,
+            def: def.clone(),
+            texture: textures.tinted(path, UNLIT_TINT, &mut load),
+            scale: sliced.scale,
+            dimensions: sliced.dimensions,
+            borders: sliced.borders,
+            anchor: sliced.anchor,
+            border_only: sliced.border_only,
+            color: sliced.color,
+        });
+    }
+    let mut texts = Vec::new();
+    for t in &hud.scene.texts {
+        let Some(object) = hud.scene.object_of(t.object) else { continue };
+        if !subtree.contains(&object) || t.shadow_of.is_some() {
+            continue;
+        }
+        if !hud.font_textures.contains_key(&t.font) {
+            let Some(path) = hud.fonts.get(&t.font).and_then(|f| f.texture.clone()) else {
+                warn!("UI font {} not found", t.font);
+                continue;
+            };
+            hud.font_textures.insert(t.font.clone(), textures.tinted(&path, UNLIT_TINT, &mut load));
+        }
+        texts.push(HudText {
+            object,
+            font: t.font.clone(),
+            text: t.text.clone(),
+            color: t.color,
+            color2: t.color2,
+            use_gradient: t.use_gradient,
+            layout: TextLayout::of(t),
+        });
+    }
+    for t in texts {
+        hud.text_of.insert(t.object, hud.texts.len());
+        hud.texts.push(t);
+    }
     hud.anchors = hud
         .scene
         .scripts_named("ViewportAnchor")
         .filter(|s| s.enabled && subtree.contains(&s.object))
         .map(|s| (s.object, s.fields.get("point").and_then(unity_data::yaml::Value::as_vec2).map_or([0.0, 0.0], |(x, y)| [x, y])))
         .collect();
-    info!("HUD: {} sprites under Player Info, {} anchors", hud.sprites.len(), hud.anchors.len());
+    hud.scalers = hud.scene.scripts_named("ScaleWithAspectRatioToMaintainWidthFraction").filter(|s| s.enabled && subtree.contains(&s.object)).map(|s| s.object).collect();
+    for root in std::iter::once(player_info).chain(team_info) {
+        if !hud.scalers.contains(&root) {
+            hud.scalers.push(root);
+        }
+    }
+    info!(
+        "HUD: {} sprites, {} sliced sprites, {} texts, {} anchors",
+        hud.sprites.len(),
+        hud.sliced.len(),
+        hud.texts.len(),
+        hud.anchors.len()
+    );
     let [x, y, z] = hud.camera;
     commands.spawn((
         Name::new("UI Camera"),
@@ -281,42 +482,109 @@ fn color_of(rgba: [u8; 4]) -> [f32; 4] {
     rgba.map(|v| f32::from(v) / 255.0)
 }
 
-/// `Player.SetUp` for the local player, then every frame what `HealthUI` and
-/// `WeaponIndicatorUI` react to (`Health.Changed`, `Lives.Lost`, `WeaponChanged`).
-#[allow(clippy::type_complexity)]
+/// A player's avatar as the HUD reads it.
+struct PlayerView<'a> {
+    player: &'a Player,
+    lives: Option<&'a PlayerLives>,
+    mortal: &'a Mortal,
+    armament: &'a Armament,
+    disabled: bool,
+    vehicle: Option<&'a Helicopter>,
+    palette: Option<&'a Palette>,
+    /// `VersusScoreUI`: the definitive total once the game has ended, else `PlayerScore.Frags`.
+    frags: i32,
+}
+
+/// `Player.SetUp` for every player, then every frame what `HealthUI`, `VersusScoreUI` and
+/// `WeaponIndicatorUI` react to (`Health.Changed`, `Lives.Lost`, `WeaponChanged`, the frags),
+/// and the Team Versus `TeamVersusScoreUI`s.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn update_hud(
     mut hud: ResMut<HudScene>,
     session: Res<Session>,
     clock: Res<FrameClock>,
     art: Option<Res<ManArt>>,
-    players: Query<(&Player, Option<&PlayerLives>)>,
+    versus: Option<Res<crate::versus::VersusState>>,
+    players: Query<(&Player, Option<&PlayerLives>, &PlayerScore)>,
     // `Has<Disabled>` keeps the avatar in view while its player flies a vehicle.
     avatars: Query<(&Mortal, &ControlledBy, &Armament, Has<Disabled>, Option<&Piloting>, Option<&Palette>), Without<Enemy>>,
     helicopters: Query<&Helicopter>,
 ) {
-    let Ok((mortal, controlled_by, armament, disabled, piloting, palette)) = avatars.single() else { return };
-    // `Player.SetUp` for a vehicle hands `HealthUI` the vehicle's `Health` and
-    // `WeaponIndicatorUI` no character controller.
-    let vehicle = piloting.and_then(|p| helicopters.get(p.vehicle).ok());
-    let Ok((player, lives)) = players.get(controlled_by.0) else { return };
     let Some(art) = art else { return };
     let hud = &mut *hud;
+    let mut teams: [Vec<(usize, [f32; 4], i32)>; 2] = [Vec::new(), Vec::new()];
+    for (mortal, controlled_by, armament, disabled, piloting, palette) in &avatars {
+        let Ok((player, lives, score)) = players.get(controlled_by.0) else { continue };
+        // `Player.SetUp` for a vehicle hands `HealthUI` the vehicle's `Health` and
+        // `WeaponIndicatorUI` no character controller.
+        let vehicle = piloting.and_then(|p| helicopters.get(p.vehicle).ok());
+        let frags = versus.as_ref().and_then(|v| v.definitive.total(player.index)).unwrap_or(score.0.frags());
+        let view = PlayerView { player, lives, mortal, armament, disabled, vehicle, palette, frags };
+        let Some(info) = update_player_info(hud, &session, &clock, &art, &view) else { continue };
+        if let Some(members) = teams.get_mut(player.team) {
+            let body = color_of(palette.map_or_else(|| art.body_color(), |p| p.body));
+            members.push((info, body, frags));
+        }
+    }
+    if session.mode == GameMode::TeamVersus {
+        update_team_info(hud, &teams);
+    }
+}
+
+/// `TeamVersusScoreUI` (`Team Info/Offset/<team>`): switched on by its first player's
+/// `SetUp`, coloured like its players, centred over their `Player Info`s, showing their frags.
+fn update_team_info(hud: &mut HudScene, teams: &[Vec<(usize, [f32; 4], i32)>; 2]) {
+    let Some(offset) = hud.team_info.and_then(|t| hud.scene.child(t, "Offset")) else { return };
+    for (team, members) in teams.iter().enumerate() {
+        if members.is_empty() {
+            continue;
+        }
+        let Some(info) = hud.scene.child(offset, &team.to_string()) else { continue };
+        let Some(script) = hud.scene.script(info, "TeamVersusScoreUI").cloned() else { continue };
+        let name = hud.scene.field_object(&script, "teamNameLabel");
+        let score = hud.scene.field_object(&script, "scoreLabel");
+        if !hud.active[info] {
+            hud.active[info] = true;
+            // `OnEnable`: off to the side until `Update` places it.
+            hud.local_position[info][0] = -1000.0;
+        }
+        if let (Some(label), Some(color)) = (name, sticks_sim::versus::team_color(&members.iter().map(|m| m.1).collect::<Vec<_>>())) {
+            hud.set_text_color(label, color);
+        }
+        // `Update`: `transform.position.x` = the mean x of the players' info objects.
+        let mean = members.iter().map(|m| hud.world(m.0).t[0]).sum::<f32>() / members.len() as f32;
+        if let Some(parent) = hud.scene.objects[info].parent {
+            let world = hud.world(info).t;
+            let local = hud.world(parent).inverse().transform_point([mean, world[1], world[2]]);
+            hud.local_position[info][0] = local[0];
+        }
+        if let Some(label) = score {
+            let total: i32 = members.iter().map(|m| m.2).sum();
+            hud.set_text(label, &total.to_string());
+        }
+    }
+}
+
+/// One player's `Player Info`: its set-up on first sight, then this frame. Returns the info
+/// object.
+fn update_player_info(hud: &mut HudScene, session: &Session, clock: &FrameClock, art: &ManArt, view: &PlayerView<'_>) -> Option<usize> {
+    let PlayerView { player, lives, mortal, armament, disabled, vehicle, palette, frags } = *view;
     // Lives only exist in the campaign (`Player.SetUp` destroys them otherwise).
     let lives = if session.mode == GameMode::Campaign { lives } else { None };
     let weapon_name = |index: usize| art.model().rig().weapons.get(index).map(|w| w.name.clone());
 
-    if hud.slot.is_none() {
+    if !hud.slots.contains_key(&player.index) {
         // `Player.SetUp`: `playerInfoPosition` is the player index, or in Team Versus its place
         // when the players are grouped by team.
         let position = if session.mode == GameMode::TeamVersus {
-            session.teams.player_position_when_grouped(player.index, |p| p == session.player_index, session.player_count).unwrap_or(player.index)
+            session.teams.player_position_when_grouped(player.index, |p| session.has_controls(p), session.player_count).unwrap_or(player.index)
         } else {
             player.index
         };
-        let Some(player) = hud.scene.child(hud.player_info, &format!("Player {}", position + 1)) else { return };
+        let info = hud.scene.child(hud.player_info, &format!("Player {}", position + 1))?;
         // `playerInfo.SetActive(true)` (which runs `WeaponIndicatorUI.Awake`).
-        hud.active[player] = true;
-        let Some(health_ui) = hud.scene.script(player, "HealthUI").cloned() else { return };
+        hud.active[info] = true;
+        let health_ui = hud.scene.script(info, "HealthUI").cloned()?;
         let bars: Vec<usize> = hud.scene.field_objects(&health_ui, "bars").into_iter().flatten().collect();
         // `HealthUI.SetUp(lives, health, colors.Body)`.
         let mut bar_color = color_of(palette.map_or_else(|| art.body_color(), |p| p.body));
@@ -338,12 +606,13 @@ fn update_hud(
             hud.local_position[below] = [0.0, step * (remaining + 1) as f32, 0.0];
         }
         let current = remaining.clamp(0, bars.len() as i32 - 1) as usize;
-        // `VersusScoreUI.SetUp`: the score label shows in Versus only.
-        if let Some(label) = hud.scene.script(player, "VersusScoreUI").and_then(|s| hud.scene.field_object(s, "label")) {
+        // `VersusScoreUI.SetUp`: the score label shows (and updates) in Versus only.
+        let score_label = hud.scene.script(info, "VersusScoreUI").and_then(|s| hud.scene.field_object(s, "label"));
+        if let Some(label) = score_label {
             hud.active[label] = session.mode == GameMode::Versus;
         }
         // `WeaponIndicatorUI.Awake` / `SetUp`: allowed weapons' indicators side by side.
-        let indicators = hud.scene.script(player, "WeaponIndicatorUI").and_then(|s| hud.scene.field_object(s, "indicators"));
+        let indicators = hud.scene.script(info, "WeaponIndicatorUI").and_then(|s| hud.scene.field_object(s, "indicators"));
         let mut indicator_names = Vec::new();
         let (mut enabled_color, mut disabled_color) = ([1.0; 4], [1.0; 4]);
         if let Some(container) = indicators {
@@ -368,22 +637,28 @@ fn update_hud(
                 }
             }
         }
-        hud.slot = Some(PlayerSlot {
-            bars,
-            current,
-            lives_seen: remaining,
-            fades: Vec::new(),
-            indicators,
-            indicator_names,
-            enabled_color,
-            disabled_color,
-            // TODO(UNCERTAIN): whether `WeaponChanged` fires after `SetUp` for the starting
-            // weapon; the indicators are coloured from the first frame on.
-            weapon_seen: None,
-        });
+        hud.slots.insert(
+            player.index,
+            PlayerSlot {
+                info,
+                bars,
+                current,
+                lives_seen: remaining,
+                fades: Vec::new(),
+                indicators,
+                indicator_names,
+                enabled_color,
+                disabled_color,
+                // TODO(UNCERTAIN): whether `WeaponChanged` fires after `SetUp` for the starting
+                // weapon; the indicators are coloured from the first frame on.
+                weapon_seen: None,
+                score_label: score_label.filter(|_| session.mode == GameMode::Versus),
+                frags_seen: None,
+            },
+        );
     }
 
-    let Some(mut slot) = hud.slot.take() else { return };
+    let mut slot = hud.slots.remove(&player.index)?;
     // `Lives.Lost` → `HealthUI.LifeLost`: fade out the bar of the life just lost.
     if let Some(lives) = lives {
         while slot.lives_seen > lives.remaining() {
@@ -437,25 +712,21 @@ fn update_hud(
     if let Some(indicators) = slot.indicators {
         hud.active[indicators] = !disabled && mortal.avatar_active();
     }
-    hud.slot = Some(slot);
+    // `VersusScoreUI.Update`.
+    if let Some(label) = slot.score_label {
+        if slot.frags_seen != Some(frags) {
+            hud.set_text(label, &frags.to_string());
+            slot.frags_seen = Some(frags);
+        }
+    }
+    let info = slot.info;
+    hud.slots.insert(player.index, slot);
+    Some(info)
 }
 
 /// Lay the HUD out for this frame's window (`BigScreenOrthographicCameraScaler`,
-/// `ScaleWithAspectRatioToMaintainWidthFraction`, `ViewportAnchor`), queue its sprites as the UI
-/// camera sorts them and upload them.
-#[allow(clippy::too_many_arguments)]
-fn draw_hud(
-    mut commands: Commands,
-    mut hud: ResMut<HudScene>,
-    textures: Res<UnityTextures>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut cameras: Query<&mut Projection, With<HudCamera>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut runs_query: Query<(&mut Transform, &mut Visibility, &mut MeshMaterial3d<UnityLitMaterial>), With<HudRun>>,
-) {
-    if textures.materials.is_empty() {
-        return;
-    }
+/// `ScaleWithAspectRatioToMaintainWidthFraction`, `ViewportAnchor`).
+fn layout_hud(mut hud: ResMut<HudScene>, windows: Query<&Window, With<PrimaryWindow>>, mut cameras: Query<&mut Projection, With<HudCamera>>) {
     let Ok(window) = windows.single() else { return };
     let hud = &mut *hud;
     let (width, height) = (window.physical_width() as f32, window.physical_height() as f32);
@@ -477,9 +748,15 @@ fn draw_hud(
     if (scale - 1.0).abs() < 0.01 {
         scale = 1.0;
     }
-    hud.local_scale[hud.player_info] = [scale, scale, 1.0];
+    for i in 0..hud.scalers.len() {
+        let object = hud.scalers[i];
+        hud.local_scale[object] = [scale, scale, 1.0];
+    }
+    hud.ortho = ortho;
+    hud.aspect = aspect;
 
     // `ViewportAnchor.Update`: `camera.ViewportToWorldPoint(point, z)` of the orthographic camera.
+    // Parents first (`Player Info`'s players under nothing anchored; the menus under `In-Game UI`).
     let camera = hud.camera;
     let mut anchored = HashMap::new();
     for &(object, point) in &hud.anchors {
@@ -488,9 +765,26 @@ fn draw_hud(
         let y = camera[1] + (point[1] * 2.0 - 1.0) * ortho;
         anchored.insert(object, [x, y, z]);
     }
+    hud.anchored = anchored;
+}
 
+/// Queue the HUD's sprites, panels and texts as the UI camera sorts them and upload them.
+#[allow(clippy::too_many_arguments)]
+fn draw_hud(
+    mut commands: Commands,
+    mut hud: ResMut<HudScene>,
+    textures: Res<UnityTextures>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut runs_query: Query<(&mut Transform, &mut Visibility, &mut MeshMaterial3d<UnityLitMaterial>), With<HudRun>>,
+) {
+    if textures.materials.is_empty() {
+        return;
+    }
+    let hud = &mut *hud;
+    let camera = hud.camera;
     hud.queue.clear();
     let mut cache = HashMap::new();
+    let anchored = std::mem::take(&mut hud.anchored);
     for i in 0..hud.sprites.len() {
         let object = hud.sprites[i].object;
         if !hud.scene.active_in_hierarchy(object, &hud.active) {
@@ -503,9 +797,40 @@ fn draw_hud(
             None => sprite_geometry(&s.def, s.scale, s.color, &world),
         };
         if !geometry.is_empty() {
-            hud.queue.push_frame(s.texture, geometry);
+            let sorting = hud.sorting_of(object);
+            hud.queue.push_frame_sorted(s.texture, geometry, sorting);
         }
     }
+    for i in 0..hud.sliced.len() {
+        let object = hud.sliced[i].object;
+        if !hud.scene.active_in_hierarchy(object, &hud.active) {
+            continue;
+        }
+        let world = hud.world_of(object, &anchored, &mut cache);
+        let s = &hud.sliced[i];
+        let geometry = sliced_sprite_geometry(&s.def, s.scale, s.dimensions, s.borders, s.anchor, s.border_only, s.color, &world);
+        if !geometry.is_empty() {
+            let sorting = hud.sorting_of(object);
+            hud.queue.push_frame_sorted(s.texture, geometry, sorting);
+        }
+    }
+    for i in 0..hud.texts.len() {
+        let object = hud.texts[i].object;
+        if hud.texts[i].text.is_empty() || !hud.scene.active_in_hierarchy(object, &hud.active) {
+            continue;
+        }
+        let world = hud.world_of(object, &anchored, &mut cache);
+        let t = &hud.texts[i];
+        let (Some(font), Some(&texture)) = (hud.fonts.fonts.get(&t.font), hud.font_textures.get(&t.font)) else { continue };
+        let formatted = format_text(font, &t.layout, &t.text);
+        let local = text_local_geometry(font, &t.layout, &formatted, t.color, t.color2, t.use_gradient);
+        let geometry = place(&local, &world);
+        if !geometry.is_empty() {
+            let sorting = hud.sorting_of(object);
+            hud.queue.push_frame_sorted(texture, geometry, sorting);
+        }
+    }
+    hud.anchored = anchored;
     hud.queue.sort(SimVec3::new(camera[0], camera[1], camera[2]));
     let runs = hud.queue.runs(&[], None);
     let base = Vec3::new(camera[0], camera[1], -camera[2]);

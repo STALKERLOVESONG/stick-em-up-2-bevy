@@ -32,7 +32,7 @@ fn skyline_enemies() {
     assert_eq!(count(&|e| e.fire_and_move_if_necessary && e.move_to_first_target && e.fire_at_first_target && !e.duck), 6);
     assert_eq!(count(&|e| e.duck && e.fire_at_first_target && !e.move_to_first_target), 6);
     assert_eq!(count(&|e| !e.duck && e.fire_at_first_target && !e.move_to_first_target && !e.fire_and_move_if_necessary), 9);
-    assert_eq!(count(&|e| e.emerge), 0);
+    assert_eq!(count(&|e| e.emerge.is_some()), 0);
     assert_eq!(count(&|e| e.selected_weapon.as_deref() == Some("Rocket Launcher")), 20);
 
     for e in &level.enemies {

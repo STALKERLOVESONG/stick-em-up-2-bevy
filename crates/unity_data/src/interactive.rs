@@ -10,7 +10,7 @@ use crate::level::{Collider, Level, all_colliders, extract_level};
 use crate::math::Affine;
 use crate::scene::{FileId, Scene, class};
 use crate::scripts::ScriptIndex;
-use crate::sprites::{SceneSprite, scene_sprites_with};
+use crate::sprites::{SceneSlicedSprite, SceneSprite, scene_sliced_sprites, scene_sprites_with};
 use crate::yaml::Value;
 
 #[derive(Clone, Debug)]
@@ -52,10 +52,14 @@ pub struct InteractiveScene {
     pub objects: Vec<ObjectNode>,
     pub scripts: Vec<ScriptInstance>,
     pub sprites: Vec<SceneSprite>,
+    /// `tk2dSlicedSprite`s under any object.
+    pub sliced: Vec<SceneSlicedSprite>,
     pub texts: Vec<SceneText>,
     /// Colliders (with their `PolygonColliderRenderer` surfaces) under any object.
     pub colliders: Vec<Collider>,
     pub boxes: Vec<BoxCollider>,
+    /// `MeshRenderer.m_SortingLayerID` and `m_SortingOrder` per object.
+    pub sorting: HashMap<usize, (i64, i64)>,
     /// Camera, light and the rest of what the level reader extracts (active parts only).
     pub level: Level,
     by_id: HashMap<FileId, usize>,
@@ -150,6 +154,7 @@ pub fn load_interactive_scene(export_root: &Path, scene_path: &str) -> std::io::
     let mut component_object = HashMap::new();
     let mut scripts = Vec::new();
     let mut boxes = Vec::new();
+    let mut sorting = HashMap::new();
     for (index, g) in gos.iter().enumerate() {
         for c in g.components() {
             component_object.insert(c.file_id, index);
@@ -163,6 +168,9 @@ pub fn load_interactive_scene(export_root: &Path, scene_path: &str) -> std::io::
                         fields: c.body.clone(),
                     });
                 }
+                class::MESH_RENDERER => {
+                    sorting.insert(index, (c.body.i64_of("m_SortingLayerID").unwrap_or(0), c.body.i64_of("m_SortingOrder").unwrap_or(0)));
+                }
                 class::BOX_COLLIDER => {
                     let v3 = |k: &str, d: f32| c.body.get(k).and_then(Value::as_vec3).map_or([d; 3], |(x, y, z)| [x, y, z]);
                     boxes.push(BoxCollider { object: index, center: v3("m_Center", 0.0), size: v3("m_Size", 1.0), enabled: c.body.bool_of("m_Enabled").unwrap_or(true) });
@@ -173,11 +181,13 @@ pub fn load_interactive_scene(export_root: &Path, scene_path: &str) -> std::io::
     }
     Ok(InteractiveScene {
         sprites: scene_sprites_with(&scene, &scripts_index, true),
+        sliced: scene_sliced_sprites(&scene, &scripts_index),
         texts: scene_texts(&scene, &scripts_index, true),
         colliders: all_colliders(&scene, &scripts_index),
         objects,
         scripts,
         boxes,
+        sorting,
         level,
         by_id,
         component_object,

@@ -170,7 +170,7 @@ fn load_effects(config: Res<GameConfig>, library: Option<Res<ProjectileLibrary>>
 
 fn clear_effects(mut commands: Commands, explosions: Query<Entity, With<ProjectileExplosion>>, particles: Query<Entity, With<ParticleFx>>) {
     for e in explosions.iter().chain(particles.iter()) {
-        commands.entity(e).despawn();
+        commands.entity(e).try_despawn();
     }
 }
 
@@ -249,7 +249,7 @@ fn explode_projectiles(
         if !e.prepared {
             // `explosion == null`: `explodable.Finished()` at once → `DespawnOnExplosionFinished`.
             if spec.despawns_on_explosion_finished {
-                commands.entity(e.projectile).despawn();
+                commands.entity(e.projectile).try_despawn();
                 pools.release(&spec.guid);
             }
             continue;
@@ -278,7 +278,7 @@ fn explode_projectiles(
         });
         // `ExplodeSpritesAndLines`: the projectile is hidden this frame (`LateUpdate`); its
         // explosion takes its place until `DespawnOnExplosionFinished`.
-        commands.entity(e.projectile).despawn();
+        commands.entity(e.projectile).try_despawn();
         commands.spawn((Name::new(format!("{} explosion", spec.name)), ProjectileExplosion { explosion, anchor: e.anchor }, crate::weapon::PoolMember(spec.guid.clone())));
     }
 }
@@ -298,7 +298,7 @@ fn tick_projectile_explosions(
         let current = anchor.and_then(|a| anchors.resolve(a));
         let finished = fx.explosion.update_anchored(delta, &|id| current.filter(|_| anchor.is_some_and(|a| a.id() == id)));
         if finished {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
             if let Some(m) = member {
                 pools.release(&m.0);
             }
@@ -362,7 +362,7 @@ fn simulate_particles(clock: Res<FrameClock>, collision: Option<Res<Collision>>,
 fn despawn_dead_particle_systems(mut commands: Commands, effects: Query<(Entity, &ParticleFx)>) {
     for (entity, fx) in &effects {
         if !fx.effect.system.is_alive() {
-            commands.entity(entity).despawn();
+            commands.entity(entity).try_despawn();
         }
     }
 }

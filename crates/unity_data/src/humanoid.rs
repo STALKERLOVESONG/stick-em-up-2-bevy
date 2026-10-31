@@ -29,6 +29,8 @@ pub struct HumanNode {
 pub struct HumanAvatar {
     /// `m_Human.m_Scale`: root translation curves are in units of this scale.
     pub scale: f32,
+    /// `m_Human.m_ArmStretch`: how much longer (as a fraction) IK may make an arm to reach a goal.
+    pub arm_stretch: f32,
     /// Center-of-mass transform of the rest pose (`m_RootX`).
     pub root_t: [f32; 3],
     pub root_q: [f32; 4],
@@ -146,6 +148,7 @@ pub fn parse_avatar(text: &str) -> Option<HumanAvatar> {
 
     Some(HumanAvatar {
         scale: human.f32_of("m_Scale")?,
+        arm_stretch: human.f32_of("m_ArmStretch").unwrap_or(0.0),
         root_t: vec3_of(human.get("m_RootX")?.get("t"))?,
         root_q: quat_of(human.get("m_RootX")?.get("q"))?,
         nodes,

@@ -76,6 +76,18 @@ impl Scene {
         out
     }
 
+    /// `GameObject.SetActive` on the parsed data (what an `Awake` did before the readers look).
+    pub fn set_active_self(&mut self, go: FileId, active: bool) {
+        let Some(doc) = self.docs.get_mut(&go) else { return };
+        let value = Value::Scalar(if active { "1" } else { "0" }.to_owned());
+        if let Value::Map(entries) = &mut doc.body {
+            match entries.iter_mut().find(|(k, _)| k == "m_IsActive") {
+                Some(entry) => entry.1 = value,
+                None => entries.push(("m_IsActive".to_owned(), value)),
+            }
+        }
+    }
+
     fn transform_doc(&self, go: FileId) -> Option<&Document> {
         self.docs.get(self.transform_of.get(&go)?)
     }

@@ -40,7 +40,7 @@ The original game was built in Unity 5. This project studies how it *behaves*: i
 | Audio | 🟡 implemented, playback being verified |
 | Vehicles | 🟡 helicopters done; cars, rockets, cannons to do |
 | UI & lobby | 🟡 main flow done; customisation screens to do |
-| Networking & game loop | 🟡 offline loop done; online play not planned |
+| Networking & game loop | 🟡 offline loop done; LAN and peer-to-peer internet play implemented, being tested |
 
 The detailed per-feature audit, including every behaviour still marked uncertain, is in [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md).
 
@@ -93,6 +93,20 @@ The game opens on the lobby. To jump straight into a level, pass its scene path 
 ```sh
 cargo run --release -p sticks_game -- /path/to/ExportedProject "Assets/Game/Levels/Skyline/Skyline 2.unity"
 ```
+
+### Launcher
+
+```sh
+cargo run --release -p sticks_launcher
+```
+
+A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), pick the volume, fullscreen and vertical sync, and set the name other players see. **Play** starts `sticks_game` from the same folder with those choices. The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
+
+### Playing with friends
+
+On the same network, one player picks **Start Network Game** and the others see **Join Game** on the title screen, as in the original.
+
+Over the internet the connection is peer to peer (no server): the host presses **Send Link** in the lobby, which copies an invitation (`seu2://<game code>/<name>`) to the clipboard. A friend copies that invitation, and their title screen lists the game while it is open. Connections are direct when both routers allow it, and relayed (encrypted end to end) otherwise.
 
 ### Tests
 

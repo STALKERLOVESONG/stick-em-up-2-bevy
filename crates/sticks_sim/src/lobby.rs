@@ -3,8 +3,7 @@
 //! players by team (`GetPlayerPositionWhenGroupedByTeams`).
 //!
 //! The team arrangement screen (`TeamArrangement`) moves players with drag and drop or
-//! left/right; it only appears in Team Versus, which needs more local players than the one
-//! keyboard-and-mouse controller this port supports, so only the model is used for now.
+//! left/right ([`LobbyTeams::step`] for each of the player's inputs).
 
 /// `LobbyTeams.MAX_TEAMS`.
 pub const MAX_TEAMS: usize = 2;
@@ -174,11 +173,182 @@ pub fn default_body_color(player: usize, team_versus: Option<&LobbyTeams>) -> Op
 /// matching helmet (`MatchingHelmetColorForBodyColor`: body × 0.8980392, alpha kept) and a
 /// random face; `CharacterColor.SetColors` stores body and face as `Color32`.
 pub fn player_palette(player: usize, team_versus: Option<&LobbyTeams>, rng: &mut crate::rng::GameRng) -> Option<crate::visual::CharacterPalette> {
-    let body32 = default_body_color(player, team_versus)?;
-    let body = body32.map(|c| f32::from(c) / 255.0);
+    spawn_palette(player, &CharacterColors::default(), team_versus, rng)
+}
+
+/// `CharacterColors`: a player's chosen colours; `None` is "Default" (body), "Match" (helmet) or
+/// "Random" (face).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CharacterColors {
+    pub body: Option<[f32; 4]>,
+    pub helmet: Option<[f32; 4]>,
+    pub face: Option<[f32; 4]>,
+}
+
+/// `CustomizeColor.ColorType`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorType {
+    Body,
+    Helmet,
+    Face,
+}
+
+impl ColorType {
+    /// The serialized `type` field (`Body = 0, Helmet = 1, Face = 2`).
+    pub fn from_index(index: i64) -> Option<ColorType> {
+        match index {
+            0 => Some(ColorType::Body),
+            1 => Some(ColorType::Helmet),
+            2 => Some(ColorType::Face),
+            _ => None,
+        }
+    }
+
+    /// Caption of the swatch row's first button (`CustomizeColor.Awake`).
+    pub fn default_caption(self) -> &'static str {
+        match self {
+            ColorType::Helmet => "Match",
+            ColorType::Face => "Random",
+            ColorType::Body => "Default",
+        }
+    }
+}
+
+impl CharacterColors {
+    pub fn get(&self, kind: ColorType) -> Option<[f32; 4]> {
+        match kind {
+            ColorType::Body => self.body,
+            ColorType::Helmet => self.helmet,
+            ColorType::Face => self.face,
+        }
+    }
+
+    pub fn set(&mut self, kind: ColorType, color: Option<[f32; 4]>) {
+        match kind {
+            ColorType::Body => self.body = color,
+            ColorType::Helmet => self.helmet = color,
+            ColorType::Face => self.face = color,
+        }
+    }
+
+    /// `BodyOrDefaultForPlayer`.
+    pub fn body_or_default(&self, player: usize, team_versus: Option<&LobbyTeams>) -> Option<[f32; 4]> {
+        self.body.or_else(|| default_body_color(player, team_versus).map(color32_to_color))
+    }
+
+    /// `HelmetOrMatchingForPlayer`.
+    pub fn helmet_or_matching(&self, player: usize, team_versus: Option<&LobbyTeams>) -> Option<[f32; 4]> {
+        self.helmet.or_else(|| self.body_or_default(player, team_versus).map(matching_helmet_color))
+    }
+}
+
+/// `LocalPlayerColorAssignments.colors`: each local player's chosen colours by `PlayerID`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColorAssignments(pub Vec<(crate::level_end::PlayerId, CharacterColors)>);
+
+impl ColorAssignments {
+    /// `GetColors` (all "none" for a player without an entry).
+    pub fn get(&self, id: &crate::level_end::PlayerId) -> CharacterColors {
+        self.0.iter().find(|(p, _)| p.platform == id.platform && p.id == id.id).map(|(_, c)| *c).unwrap_or_default()
+    }
+
+    /// `SetColors`: all-"none" colours remove the entry. Whether anything changed (the
+    /// original then saves `Colors.dat`).
+    pub fn set(&mut self, id: &crate::level_end::PlayerId, colors: CharacterColors) -> bool {
+        let before = self.get(id);
+        let index = self.0.iter().position(|(p, _)| p.platform == id.platform && p.id == id.id);
+        match (index, colors == CharacterColors::default()) {
+            (Some(i), true) => {
+                self.0.remove(i);
+            }
+            (Some(i), false) => self.0[i].1 = colors,
+            (None, true) => {}
+            (None, false) => self.0.push((id.clone(), colors)),
+        }
+        before != colors
+    }
+}
+
+/// `Color32` → `Color`.
+pub fn color32_to_color(c: [u8; 4]) -> [f32; 4] {
+    c.map(|v| f32::from(v) / 255.0)
+}
+
+/// `CharacterColors.MatchingHelmetColorForBodyColor`: the body darkened to 0.8980392 (alpha kept).
+pub fn matching_helmet_color(body: [f32; 4]) -> [f32; 4] {
     let k = 0.898_039_2;
-    let helmet = [body[0] * k, body[1] * k, body[2] * k, body[3]];
-    Some(crate::visual::CharacterPalette { body: crate::visual::to_color32(body), helmet, face: crate::visual::random_face_color(rng) })
+    [body[0] * k, body[1] * k, body[2] * k, body[3]]
+}
+
+/// `Color.grayscale`.
+pub fn grayscale(c: [f32; 4]) -> f32 {
+    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+}
+
+/// `Color.Lerp` (t clamped to 0..1).
+pub fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [0, 1, 2, 3].map(|k| a[k] + (b[k] - a[k]) * t)
+}
+
+/// `CustomizeColor`'s static swatch lists: the 15 body colours, their matching helmets, and 20
+/// faces (ten darker and ten lighter shades, sorted by `grayscale`; `List.Sort` is not stable,
+/// but no two shades share a grey value).
+pub fn swatches(kind: ColorType) -> Vec<[f32; 4]> {
+    match kind {
+        ColorType::Body => BODY_COLORS.iter().map(|&c| color32_to_color(c)).collect(),
+        ColorType::Helmet => BODY_COLORS.iter().map(|&c| matching_helmet_color(color32_to_color(c))).collect(),
+        ColorType::Face => {
+            let mut faces: Vec<[f32; 4]> = (0..10).map(|j| crate::visual::darker_face_color(j as f32 / 10.0 * 2.0 - 1.0)).collect();
+            faces.extend((0..10).map(|k| crate::visual::lighter_face_color(k as f32 / 10.0 * 2.0 - 1.0)));
+            faces.sort_by(|a, b| grayscale(*a).total_cmp(&grayscale(*b)));
+            faces
+        }
+    }
+}
+
+/// `CustomizeColor.GetClosestColorIndex`: the swatch with the least summed RGB difference (the
+/// first of equals); -1 for "none".
+pub fn closest_color_index(swatches: &[[f32; 4]], color: Option<[f32; 4]>) -> i32 {
+    let Some(color) = color else { return -1 };
+    let mut result = 0;
+    let mut best = f32::MAX;
+    for (i, c) in swatches.iter().enumerate() {
+        let d = (color[0] - c[0]).abs() + (color[1] - c[1]).abs() + (color[2] - c[2]).abs();
+        if d < best {
+            best = d;
+            result = i as i32;
+        }
+    }
+    result
+}
+
+/// `CustomizeColor`'s spacing of swatches (`sampleWidth`).
+pub const SAMPLE_WIDTH: f32 = 1.4;
+
+/// `CustomizeColor.Awake`: x of swatch 0 (the "Default" button sits one width to its left).
+pub fn samples_start_x(swatch_count: usize) -> f32 {
+    let total = (swatch_count + 1 - 1) as f32 * SAMPLE_WIDTH;
+    -total / 2.0 + SAMPLE_WIDTH
+}
+
+/// `CustomizeColor.GetLabelTargetPositionForColorIndex`: a player's label stands under its
+/// swatch, below the labels of lower-numbered players on the same swatch.
+pub fn label_position(selected: &[Option<i32>; MAX_PLAYERS], color_index: i32, player: usize, start_x: f32, label_start_y: f32, label_height: f32, label_z: f32) -> [f32; 3] {
+    let below = selected[..player].iter().filter(|s| **s == Some(color_index)).count();
+    [start_x + color_index as f32 * SAMPLE_WIDTH, label_start_y - label_height * below as f32, label_z]
+}
+
+/// `PlayerSpawner.Spawn`: the colours a player spawns with (`CharacterColor.SetColors` stores
+/// body and face as `Color32`).
+pub fn spawn_palette(player: usize, colors: &CharacterColors, team_versus: Option<&LobbyTeams>, rng: &mut crate::rng::GameRng) -> Option<crate::visual::CharacterPalette> {
+    let body = colors.body_or_default(player, team_versus)?;
+    let helmet = colors.helmet_or_matching(player, team_versus)?;
+    let face = match colors.face {
+        Some(face) => crate::visual::to_color32(face),
+        None => crate::visual::random_face_color(rng),
+    };
+    Some(crate::visual::CharacterPalette { body: crate::visual::to_color32(body), helmet, face })
 }
 
 #[cfg(test)]
@@ -202,6 +372,29 @@ mod tests {
         assert_eq!(palette.body, [239, 66, 66, 255]);
         assert!((palette.helmet[0] - 239.0 / 255.0 * 0.898_039_2).abs() < 1e-6);
         assert_eq!(palette.helmet[3], 1.0);
+        // Customised colours win; "Match" follows the chosen body.
+        let colors = CharacterColors { body: Some([0.5, 0.5, 0.5, 1.0]), ..Default::default() };
+        let custom = spawn_palette(0, &colors, None, &mut rng).unwrap();
+        assert_eq!(custom.body, [127, 127, 127, 255]);
+        assert!((custom.helmet[0] - 0.5 * 0.898_039_2).abs() < 1e-6);
+        assert_eq!(spawn_palette(0, &CharacterColors::default(), None, &mut rng).unwrap().body, palette.body);
+    }
+
+    #[test]
+    fn swatch_lists_and_closest_colour() {
+        assert_eq!(swatches(ColorType::Body).len(), 15);
+        assert_eq!(swatches(ColorType::Helmet).len(), 15);
+        let faces = swatches(ColorType::Face);
+        assert_eq!(faces.len(), 20);
+        assert!(faces.windows(2).all(|w| grayscale(w[0]) <= grayscale(w[1])));
+        let body = swatches(ColorType::Body);
+        assert_eq!(closest_color_index(&body, None), -1);
+        assert_eq!(closest_color_index(&body, Some(body[7])), 7);
+        assert_eq!(closest_color_index(&body, Some([0.0, 0.0, 0.0, 1.0])), 13);
+        // 16 places (Default + 15) centred on the screen: swatch 0 at -9.1.
+        assert!((samples_start_x(15) - (-9.1)).abs() < 1e-5);
+        let selected = [Some(3), Some(3), None, Some(3)];
+        assert_eq!(label_position(&selected, 3, 3, 0.0, 1.0, 0.5, -0.1), [3.0 * SAMPLE_WIDTH, 0.0, -0.1]);
     }
 
     #[test]

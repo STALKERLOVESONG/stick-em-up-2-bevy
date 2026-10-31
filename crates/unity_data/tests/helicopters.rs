@@ -92,3 +92,43 @@ fn skyline_2_has_player_and_enemy_helicopters() {
         assert!(h.guns.iter().all(|g| !g.control_slot));
     }
 }
+
+/// `MinimumPlayers` on the Skyline helicopter's second and third guns (3 and 4 players): a
+/// one-player game keeps only the pilot's gun.
+#[test]
+fn skyline_helicopter_guns_follow_minimum_players() {
+    let Some(root) = export_root() else { return };
+    let active_guns = |players: usize| {
+        let conditions = unity_data::level::AwakeConditions { player_count: players, difficulty: 0 };
+        let level = unity_data::level::load_level_for(&root, "Assets/Game/Levels/Skyline/Skyline.unity", Some(conditions)).unwrap();
+        let h = &level.helicopters[0];
+        h.guns
+            .iter()
+            .filter(|g| {
+                let mut current = Some(g.node);
+                while let Some(c) = current {
+                    if !h.nodes[c].active_self {
+                        return false;
+                    }
+                    current = h.nodes[c].parent;
+                }
+                true
+            })
+            .count()
+    };
+    assert_eq!(active_guns(1), 1);
+    assert_eq!(active_guns(3), 2);
+    assert_eq!(active_guns(4), 3);
+}
+
+/// `MinimumDifficulty` enemies of Japan only exist on the harder settings.
+#[test]
+fn japan_enemies_follow_minimum_difficulty() {
+    let Some(root) = export_root() else { return };
+    let count = |difficulty: i32| {
+        let conditions = unity_data::level::AwakeConditions { player_count: 1, difficulty };
+        unity_data::level::load_level_for(&root, "Assets/Game/Levels/Japan/Japan.unity", Some(conditions)).unwrap().enemies.len()
+    };
+    let (easy, hard) = (count(-1), count(1));
+    assert!(hard > easy, "beginner {easy}, expert {hard}");
+}

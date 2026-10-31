@@ -22,7 +22,7 @@
 use bevy::ecs::entity_disabling::Disabled;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use sticks_sim::ai::{Ballistics, Brain, Candidate, OffScreenSleep, Targeter};
+use sticks_sim::ai::{Ballistics, Brain, Candidate, EMERGE_DONE_Z, EMERGE_HIDDEN_Z, EMERGE_LAYER, EmergeEvent, Emergence, OffScreenSleep, Targeter, fire_at_first_target};
 use sticks_sim::camera::ViewBounds;
 use sticks_sim::character::{Character, CharacterInput, DEFAULT_Z, StandingColliders};
 use sticks_sim::life::{LifeCycle, LifeEvent};
@@ -34,7 +34,7 @@ use crate::camera::{CAMERA_TARGET_HEIGHT, CameraPlaceholder, LevelCamera, Rig};
 use crate::figure::{ManArt, Palette};
 use crate::level::{ActiveLevel, CharacterAnimation, Collision};
 use crate::life::{DeathRng, ExplosionWarmup, LifeNotice, Mortal};
-use crate::player::{Avatar, ControlledBy, Controls};
+use crate::player::{Avatar, ControlledBy, Controls, TriggerEntered};
 use crate::state::{AppState, GameMode, Session};
 use crate::weapon::{Armament, LauncherOverride, LauncherOverrides, ProjectileLibrary, Team};
 use crate::FrameSet;
@@ -62,6 +62,24 @@ pub struct AiBrain {
     pub origin_offset: SimVec3,
 }
 
+/// `Emerge` running on an enemy: its coroutine state, the activation trigger's object and the
+/// root's layer to go back to.
+#[derive(Component)]
+pub struct Emerging {
+    pub emergence: Emergence,
+    pub trigger: Option<unity_data::scene::FileId>,
+    pub original_layer: u8,
+}
+
+/// `CharacterControl2D.z` when it is not the default -0.1 (an emerging enemy waits at 0, behind
+/// the scenery).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct DrawZ(pub f32);
+
+/// `TriggeredByAnyPlayer.Triggered` of every trigger object a player has entered.
+#[derive(Resource, Default)]
+pub struct AnyPlayerTriggers(pub std::collections::HashSet<unity_data::scene::FileId>);
+
 /// `DeactivateOffScreen` on an active enemy.
 #[derive(Component, Deref, DerefMut)]
 pub struct OffScreenSleeper(pub OffScreenSleep);
@@ -81,10 +99,14 @@ pub struct EnemyPlugin;
 
 impl Plugin for EnemyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::InGame), spawn_enemies.after(crate::figure::load_man_art))
+        app.init_resource::<AnyPlayerTriggers>()
+            .add_systems(OnEnter(AppState::InGame), (|mut t: ResMut<AnyPlayerTriggers>| t.0.clear(), spawn_enemies.after(crate::figure::load_man_art)))
+            .add_systems(Update, any_player_triggers.in_set(FrameSet::FixedSteps).after(crate::player::run_fixed_steps))
             .add_systems(Update, copy_enemy_input.in_set(FrameSet::RoleInput))
-            .add_systems(Update, (sleep_off_screen, think).chain().in_set(FrameSet::Characters).before(crate::player::update_characters))
-            .add_systems(Update, wake_on_screen.in_set(FrameSet::Characters).after(crate::weapon::expire_projectiles))
+            // In a network game the host's enemies think and sleep; the other machines follow
+            // their streams (`crate::net`).
+            .add_systems(Update, (sleep_off_screen, think).chain().in_set(FrameSet::Characters).before(crate::player::update_characters).run_if(crate::net::decides))
+            .add_systems(Update, wake_on_screen.in_set(FrameSet::Characters).after(crate::weapon::expire_projectiles).run_if(crate::net::decides))
             .add_systems(Update, despawn_finished_enemies.run_if(in_state(AppState::InGame)));
     }
 }
@@ -114,9 +136,6 @@ fn spawn_enemies(
         difficulty_modified(value, &scaling.amount, scaling.affected_by_player_count, session.player_count as i32, session.difficulty)
     };
     for spawn in &level.0.enemies {
-        if spawn.emerge {
-            warn!("{}: `Emerge` is not implemented; the enemy starts emerged", spawn.name);
-        }
         let position = SimVec2::new(spawn.position[0], spawn.position[1]);
         let mut character = Character::new(animation.0.clone(), &collision.rules, StandingColliders::MAN, position);
         // `SetEnemyLayer`.
@@ -161,8 +180,15 @@ fn spawn_enemies(
             face: random_face_color(&mut rng.0),
         };
 
+        // `Emerge.Start`: the enemy hides at z 0 on layer 25 with its fighting held back (a held
+        // `Duck` is disabled, which clears the processor's duck).
+        let emergence = spawn.emerge.as_ref().map(|e| (Emergence::of(e), e.trigger_object));
+        let original_layer = character.body.layer;
+        if emergence.is_some() {
+            character.body.layer = EMERGE_LAYER;
+        }
         let input = sticks_sim::ai::EnemyInput {
-            duck: spawn.duck,
+            duck: spawn.duck && !emergence.as_ref().is_some_and(|(e, _)| e.disables_duck),
             selected_weapon: spawn.selected_weapon.as_deref().and_then(weapon_index),
             ..Default::default()
         };
@@ -187,6 +213,14 @@ fn spawn_enemies(
             CameraPlaceholder::default(),
             Transform::from_xyz(position.x, position.y, -DEFAULT_Z),
         ));
+        entity.insert(crate::level_end::SceneObject(spawn.object));
+        if let Some((emergence, trigger)) = emergence {
+            entity.insert((Emerging { emergence, trigger, original_layer }, DrawZ(EMERGE_HIDDEN_Z)));
+        }
+        if spawn.registered {
+            // `EnemyRegistrar.Start` → `NewEnemy`.
+            entity.insert(crate::level_end::Registered);
+        }
         if let Some(radius) = spawn.deactivate_off_screen {
             let mut sleep = OffScreenSleep::new(radius);
             sleep.on_loaded_level_everywhere();
@@ -223,7 +257,7 @@ fn spawn_target_dummy(commands: &mut Commands, level: &ActiveLevel, collision: &
 }
 
 /// `CharacterInput.Update` with an `EnemyCharacterInput` processor.
-fn copy_enemy_input(mut enemies: Query<(&AiInput, &mut Controls)>) {
+pub(crate) fn copy_enemy_input(mut enemies: Query<(&AiInput, &mut Controls)>) {
     for (input, mut controls) in &mut enemies {
         controls.0 = input.character_input();
     }
@@ -282,12 +316,16 @@ fn wake_on_screen(
 ///
 /// TODO(UNCERTAIN): candidates are listed in query order; the original lists `Targetable`s in
 /// `OnEnable` order, which only matters for targets at exactly equal distances.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn think(
+    mut commands: Commands,
     collision: Res<Collision>,
     library: Option<Res<ProjectileLibrary>>,
+    clock: Res<crate::player::FrameClock>,
+    triggers: Res<AnyPlayerTriggers>,
     players: Query<(&Avatar, &Mortal), With<ControlledBy>>,
     helicopters: Query<&crate::helicopter::Helicopter>,
-    mut enemies: Query<(&Avatar, &Mortal, &AiBrain, &mut AiInput, Option<&Armament>)>,
+    mut enemies: Query<(Entity, &mut Avatar, &Mortal, &AiBrain, &mut AiInput, Option<&Armament>, Option<&mut Emerging>), Without<ControlledBy>>,
 ) {
     // The "Target" of every active player helicopter (scene objects, registered first), then
     // the `Target` child of each active player avatar (`Targetable.OnEnable`/`OnDisable` follow
@@ -303,7 +341,8 @@ fn think(
     let gravity_y = collision.rules.gravity.y;
     let hit_triggers = collision.rules.raycasts_hit_triggers;
     let obstructed = |from: SimVec2, to: SimVec2, layers: u32| collision.world.linecast(from, to, layers, hit_triggers);
-    for (avatar, mortal, brain, mut input, armament) in &mut enemies {
+    let delta = clock.stepper.frame().delta;
+    for (entity, mut avatar, mortal, brain, mut input, armament, mut emerging) in &mut enemies {
         if !mortal.avatar_active() {
             continue;
         }
@@ -316,7 +355,42 @@ fn think(
             Some(Ballistics { propelled: spec.propelled, gravity_scale: spec.gravity_scale, speed: spec.speed })
         });
         let targets = brain.targeter.targets(origin, &candidates, obstructed);
-        brain.brain.think(&mut input.0, &targets, projectile, origin, gravity_y);
+        // `Emerge` holds some behaviours back until it is done.
+        let behaviours = emerging.as_ref().map_or(brain.brain, |e| e.emergence.restricted(&brain.brain));
+        behaviours.think(&mut input.0, &targets, projectile, origin, gravity_y);
+        // The `Emerge` coroutine, after the frame's `Update`s.
+        if let Some(emerging) = emerging.as_mut() {
+            let triggered = emerging.trigger.is_some_and(|t| triggers.0.contains(&t));
+            let first = targets.first();
+            let event = emerging.emergence.update(&mut input.0, triggered, origin.x, delta, |i| {
+                fire_at_first_target(i, projectile, first, origin, gravity_y);
+            });
+            match event {
+                // Out: `characterControl.z = -0.1` and the root's own layer again.
+                EmergeEvent::Emerged => {
+                    avatar.body.layer = emerging.original_layer;
+                    debug_assert_eq!(EMERGE_DONE_Z, DEFAULT_Z);
+                    commands.entity(entity).remove::<DrawZ>();
+                }
+                EmergeEvent::Completed => {
+                    commands.entity(entity).remove::<Emerging>();
+                }
+                EmergeEvent::None => {}
+            }
+        }
+    }
+}
+
+/// `TriggeredByAnyPlayer.OnTriggerEnter2D`: a player's character entered the trigger collider of
+/// an object; it stays triggered.
+fn any_player_triggers(level: Res<ActiveLevel>, mut entered: MessageReader<TriggerEntered>, players: Query<(), With<ControlledBy>>, mut triggers: ResMut<AnyPlayerTriggers>) {
+    for e in entered.read() {
+        if !players.contains(e.avatar) {
+            continue;
+        }
+        if let Some(c) = level.0.colliders.get(e.collider as usize) {
+            triggers.0.insert(c.object);
+        }
     }
 }
 
@@ -324,7 +398,7 @@ fn think(
 fn despawn_finished_enemies(mut commands: Commands, mut notices: MessageReader<LifeNotice>, enemies: Query<(), With<Enemy>>) {
     for notice in notices.read() {
         if matches!(notice.event, LifeEvent::ExplosionFinished) && enemies.contains(notice.avatar) {
-            commands.entity(notice.avatar).despawn();
+            commands.entity(notice.avatar).try_despawn();
         }
     }
 }

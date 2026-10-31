@@ -47,6 +47,23 @@ fn rotate_subtree(model: &CharacterRigModel, pose: &mut RigPose, root: usize, pi
     }
 }
 
+/// Move a bone and everything below it.
+fn translate_subtree(model: &CharacterRigModel, pose: &mut RigPose, root: usize, delta: Vec3) {
+    let bones = &model.rig().bones;
+    let mut in_subtree = vec![false; bones.len()];
+    in_subtree[root] = true;
+    for i in root..bones.len() {
+        if let Some(p) = bones[i].parent {
+            if in_subtree[p] {
+                in_subtree[i] = true;
+            }
+        }
+        if in_subtree[i] {
+            pose.world[i].0 = pose.world[i].0 + delta;
+        }
+    }
+}
+
 /// Elbow and wrist positions that put the wrist on `goal` (or as close as the arm reaches),
 /// keeping the elbow on the side of the shoulder→goal line where it already is.
 fn two_bone(shoulder: Vec3, elbow: Vec3, wrist: Vec3, goal: Vec3) -> (Vec3, Vec3) {
@@ -74,10 +91,10 @@ impl CharacterRigModel {
         let rig = self.rig();
         let Some(weapon) = rig.weapons.get(aimed.weapon) else { return solved };
         let to_local = facing.conjugate();
+        let new_rotation = to_local * weapon_rotation(aimed.aim, aimed.face_right);
 
         // `weaponPivot.LookAt(pivot + aim, up)`: the weapon bone's world rotation is replaced.
         let (weapon_position, old_rotation) = solved.world[weapon.bone];
-        let new_rotation = to_local * weapon_rotation(aimed.aim, aimed.face_right);
         rotate_subtree(self, &mut solved, weapon.bone, weapon_position, new_rotation * old_rotation.conjugate());
 
         // `OnAnimatorIK`: look at `correctedAim + weaponPivot.position`, hands onto the grips.
@@ -124,6 +141,19 @@ impl CharacterRigModel {
         rotate_subtree(self, solved, upper, s, Quat::from_to(e - s, new_elbow - s));
         let wrist_now = solved.position(hand);
         rotate_subtree(self, solved, lower, new_elbow, Quat::from_to(wrist_now - new_elbow, new_wrist - new_elbow));
+        // Mecanim's IK may stretch an arm by `m_ArmStretch` (5 % on the `Man`) to reach a goal
+        // just beyond it: both bones lengthen along their (now nearly straight) directions.
+        // TODO(UNCERTAIN): Mecanim's stretch curve is not recoverable; the length grows only by
+        // as much as the goal is out of reach, capped at the avatar's fraction.
+        let length = (new_elbow - s).magnitude() + (new_wrist - new_elbow).magnitude();
+        let reach = (goal - s).magnitude();
+        if length > 1e-6 && reach > length {
+            let k = (reach / length).min(1.0 + self.avatar().arm_stretch);
+            let elbow_shift = (new_elbow - s) * (k - 1.0);
+            translate_subtree(self, solved, lower, elbow_shift);
+            let wrist_shift = (new_wrist - new_elbow) * (k - 1.0);
+            translate_subtree(self, solved, hand, wrist_shift);
+        }
     }
 
     /// The head's look direction in its own frame. Mecanim measures look-at against the

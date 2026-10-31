@@ -21,3 +21,8 @@
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local debug hacks (build.rs compiles them in only when this file exists)
+/crates/sticks_game/src/hacks.rs
+build_log.txt
+claude_build.bat

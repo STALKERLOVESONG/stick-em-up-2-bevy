@@ -114,6 +114,20 @@ pub struct World {
     /// Colliders switched off at run time (their object deactivated or destroyed): no query sees
     /// them.
     disabled: Vec<bool>,
+    /// Dynamic rigid bodies' colliders as characters see them this step (helicopter hulls),
+    /// replaced every frame by [`World::set_moving`]; `PieceEntry::collider` indexes
+    /// `moving_colliders`. Only character bodies collide with them; queries ignore them.
+    moving_colliders: Vec<StaticCollider>,
+    moving_pieces: Vec<PieceEntry>,
+}
+
+/// A static piece's geometry, for the rigid-body contact solver (`crate::contact`).
+#[derive(Clone, Copy, Debug)]
+pub enum PieceShape<'a> {
+    /// Counter-clockwise convex polygon.
+    Convex(&'a [Vec2]),
+    Disc { center: Vec2, radius: f32 },
+    Segment(Vec2, Vec2),
 }
 
 /// Point containment for a counter-clockwise convex polygon (boundary counts as inside).
@@ -173,6 +187,13 @@ impl World {
         }
     }
 
+    /// `GameObject.layer` changed at run time (`SetLayerInCampaignMode`, `Player.SetLayer`).
+    pub fn set_layer(&mut self, id: u32, layer: u8) {
+        if let Some(&i) = self.by_id.get(&id) {
+            self.colliders[i].layer = layer;
+        }
+    }
+
     /// Whether the collider `id` exists and is enabled.
     pub fn is_enabled(&self, id: u32) -> bool {
         self.by_id.get(&id).is_some_and(|&i| !self.disabled[i])
@@ -223,6 +244,50 @@ impl World {
 
     pub fn piece_count(&self) -> usize {
         self.pieces.len()
+    }
+
+    /// Every enabled solid (non-trigger) static piece whose bounds overlap `min`..`max`, with its
+    /// collider and a stable piece index.
+    pub fn solid_pieces(&self, min: Vec2, max: Vec2, mut visit: impl FnMut(&StaticCollider, u32, PieceShape<'_>)) {
+        let aabb = Aabb { min, max };
+        let mut seen: Vec<u32> = Vec::new();
+        for cx in cell_of(aabb.min.x)..=cell_of(aabb.max.x) {
+            for cy in cell_of(aabb.min.y)..=cell_of(aabb.max.y) {
+                let Some(ids) = self.grid.get(&(cx, cy)) else { continue };
+                for &id in ids {
+                    if seen.contains(&id) {
+                        continue;
+                    }
+                    seen.push(id);
+                    let entry = &self.pieces[id as usize];
+                    let collider = &self.colliders[entry.collider];
+                    if !entry.aabb.overlaps(&aabb) || self.disabled[entry.collider] || collider.trigger {
+                        continue;
+                    }
+                    let shape = match &entry.piece {
+                        Piece::Convex(pts) => PieceShape::Convex(pts),
+                        Piece::Disc { center, radius } => PieceShape::Disc { center: *center, radius: *radius },
+                        Piece::Segment(a, b) => PieceShape::Segment(*a, *b),
+                    };
+                    visit(collider, id, shape);
+                }
+            }
+        }
+    }
+
+    /// Replace the moving colliders characters collide with: each entry is a collider and its
+    /// convex pieces (counter-clockwise, world space).
+    pub fn set_moving(&mut self, items: Vec<(StaticCollider, Vec<Vec<Vec2>>)>) {
+        self.moving_colliders.clear();
+        self.moving_pieces.clear();
+        for (collider, pieces) in items {
+            let index = self.moving_colliders.len();
+            self.moving_colliders.push(collider);
+            for piece in pieces {
+                let aabb = Aabb::of_points(&piece);
+                self.moving_pieces.push(PieceEntry { collider: index, piece: Piece::Convex(piece), aabb });
+            }
+        }
     }
 
     /// Visit each piece whose bounds overlap `aabb` exactly once.
@@ -522,7 +587,8 @@ pub fn triangulate(points: &[Vec2]) -> Vec<Vec<Vec2>> {
 /// union stays convex. Fewer pieces means fewer internal seams: a body sliding along a flat
 /// surface must not collide with the shared vertices between triangles of the same polygon
 /// (Box2D never sees them because it works on the polygon's real convex decomposition).
-fn merge_convex(mut pieces: Vec<Vec<Vec2>>) -> Vec<Vec<Vec2>> {
+/// Merge adjacent convex pieces of a triangulation back into larger convex polygons.
+pub fn merge_convex(mut pieces: Vec<Vec<Vec2>>) -> Vec<Vec<Vec2>> {
     fn key(a: Vec2, b: Vec2) -> [u32; 4] {
         [a.x.to_bits(), a.y.to_bits(), b.x.to_bits(), b.y.to_bits()]
     }
@@ -775,6 +841,9 @@ pub struct PhysicsRules {
     pub raycasts_hit_triggers: bool,
     /// The Box2D tuning for rigid bodies (`crate::rigid_body`).
     pub box2d: unity_data::settings::Box2dTuning,
+    /// `Physics2DSettings.m_VelocityIterations` / `m_PositionIterations` (`crate::contact`).
+    pub velocity_iterations: u32,
+    pub position_iterations: u32,
 }
 
 impl PhysicsRules {
@@ -817,6 +886,9 @@ pub struct StepReport {
     /// Subset of `triggers` that were not overlapped after the previous step
     /// (`OnTriggerEnter2D`). Filled in by the owner of the body, which remembers the overlaps.
     pub entered_triggers: Vec<u32>,
+    /// Triggers overlapped after the previous step but not any more (`OnTriggerExit2D`). Filled
+    /// in by the owner of the body.
+    pub exited_triggers: Vec<u32>,
 }
 
 impl Body {
@@ -836,8 +908,8 @@ impl Body {
             return;
         }
         let probe = Aabb::of_points(&probe_pts).expanded(CONTACT_MARGIN);
-        world.query(&probe, |entry| {
-            let collider = &world.colliders[entry.collider];
+        let moving = world.moving_pieces.iter().filter(|e| e.aabb.overlaps(&probe)).map(|e| (e, &world.moving_colliders[e.collider]));
+        let mut visit = |entry: &PieceEntry, collider: &StaticCollider| {
             if collider.trigger == solid || !rules.layers_collide(self.layer, collider.layer) {
                 return;
             }
@@ -864,7 +936,13 @@ impl Body {
                     push(m);
                 }
             }
-        });
+        };
+        world.query(&probe, |entry| visit(entry, &world.colliders[entry.collider]));
+        // Moving bodies are offset by their position each step (`set_moving`), so they act as
+        // obstacles placed where they are this frame.
+        for (entry, collider) in moving {
+            visit(entry, collider);
+        }
     }
 
     fn resolve_penetration(&mut self, world: &World, rules: &PhysicsRules) {
@@ -909,6 +987,28 @@ impl Body {
     }
 }
 
+/// Whether a convex, counter-clockwise polygon (world space) overlaps any collider of a body
+/// placed at `position`.
+pub fn convex_touches_body(poly: &[Vec2], position: Vec2, shape: &BodyShape) -> bool {
+    shape.circles.iter().any(|c| circle_vs_convex(position + c.offset, c.radius, poly).is_some_and(|m| m.depth > 0.0))
+        || shape.boxes.iter().any(|b| {
+            let p = position + b.offset;
+            let h = b.half_extents;
+            let quad = [p + Vec2::new(-h.x, -h.y), p + Vec2::new(h.x, -h.y), p + Vec2::new(h.x, h.y), p + Vec2::new(-h.x, h.y)];
+            convex_vs_convex(poly, &quad).is_some_and(|m| m.depth > 0.0)
+        })
+        || shape.polygons.iter().any(|piece| {
+            let world: Vec<Vec2> = piece.iter().map(|&p| position + p).collect();
+            convex_vs_convex(poly, &world).is_some_and(|m| m.depth > 0.0)
+        })
+}
+
+/// When a circle overlaps a convex, counter-clockwise polygon: the unit normal pointing from the
+/// polygon towards the circle.
+pub fn circle_convex_normal(center: Vec2, radius: f32, poly: &[Vec2]) -> Option<Vec2> {
+    circle_vs_convex(center, radius, poly).filter(|m| m.depth > 0.0).map(|m| m.normal)
+}
+
 /// Whether a circle overlaps any collider of a body placed at `position`.
 pub fn circle_touches_body(center: Vec2, radius: f32, position: Vec2, shape: &BodyShape) -> bool {
     shape.circles.iter().any(|c| (center - (position + c.offset)).magnitude() < radius + c.radius)
@@ -931,7 +1031,7 @@ mod tests {
     const G: f32 = -16.076;
 
     fn rules() -> PhysicsRules {
-        PhysicsRules { gravity: Vec2::new(0.0, G), layer_matrix: [u32::MAX; 32], raycasts_hit_triggers: true, box2d: Default::default() }
+        PhysicsRules { gravity: Vec2::new(0.0, G), layer_matrix: [u32::MAX; 32], raycasts_hit_triggers: true, box2d: Default::default(), velocity_iterations: 8, position_iterations: 3 }
     }
 
     fn ground_collider(id: u32) -> StaticCollider {
@@ -1049,6 +1149,35 @@ mod tests {
         }
         assert!(touched_wall);
         assert!(b.position.x < 10.0 - 0.6 + 0.02, "x = {}", b.position.x);
+    }
+
+    #[test]
+    fn characters_collide_with_moving_bodies_but_queries_ignore_them() {
+        let mut world = flat_world();
+        // A helicopter hull parked at x 10..14, 0..3, on layer 9 (an enemy's).
+        let hull = vec![Vec2::new(10.0, 0.0), Vec2::new(14.0, 0.0), Vec2::new(14.0, 3.0), Vec2::new(10.0, 3.0)];
+        world.set_moving(vec![(StaticCollider { id: 900, layer: 9, ..Default::default() }, vec![hull.clone()])]);
+        let mut b = man(Vec2::new(5.0, 0.0));
+        let mut touched = false;
+        for _ in 0..60 {
+            b.velocity.x = 12.0;
+            let r = b.step(&world, &rules(), 1.0 / 60.0);
+            touched |= r.contacts.iter().any(|c| c.collider == 900 && c.normal.x < -0.99);
+        }
+        assert!(touched);
+        assert!(b.position.x < 10.0 - 0.6 + 0.02, "x = {}", b.position.x);
+        // Line casts and overlap queries are for the static level only.
+        assert!(!world.linecast(Vec2::new(9.0, 1.0), Vec2::new(15.0, 1.0), 1 << 9, true));
+        // A layer the body does not collide with is passed through.
+        let mut r = rules();
+        r.layer_matrix[8] &= !(1 << 9);
+        world.set_moving(vec![(StaticCollider { id: 900, layer: 9, ..Default::default() }, vec![hull])]);
+        let mut b = man(Vec2::new(5.0, 0.0));
+        for _ in 0..60 {
+            b.velocity.x = 12.0;
+            b.step(&world, &r, 1.0 / 60.0);
+        }
+        assert!(b.position.x > 14.0);
     }
 
     fn flat_world_item() -> (StaticCollider, StaticShape) {

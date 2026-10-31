@@ -298,6 +298,77 @@ pub fn clipped_sprite_geometry(def: &SpriteDef, scale: [f32; 3], clip: [[f32; 2]
     g
 }
 
+/// `tk2dSpriteGeomGen.SetSlicedSpriteIndices`: nine cells of two triangles over a 4×4 grid
+/// (the last six indices are the centre cell, left out for `borderOnly`).
+const SLICED_INDICES: [u32; 54] = [
+    0, 4, 1, 1, 4, 5, 1, 5, 2, 2, 5, 6, 2, 6, 3, 3, 6, 7, 4, 8, 5, 5, 8, 9, 6, 10, 7, 7, 10, 11, 8, 12, 9, 9, 12, 13, 9, 13, 10, 10, 13, 14, 10, 14, 11, 11, 14, 15,
+    5, 9, 6, 6, 9, 10,
+];
+
+/// A `tk2dSlicedSprite`'s mesh (`SetSlicedSpriteGeom`): a `dimensions` (texels) box anchored
+/// at `anchor` (offsets truncated to whole texels), its corners kept at the definition's size by
+/// `borders` (left, bottom, right, top fractions of the definition), UVs sliced alike, scaled
+/// by `scale`, one vertex colour, placed with `world`. Normals face back (the UI shader is
+/// unlit). Definitions that are not single quads give nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn sliced_sprite_geometry(def: &SpriteDef, scale: [f32; 3], dimensions: [f32; 2], borders: [f32; 4], anchor: i64, border_only: bool, color: [f32; 4], world: &Affine) -> Geometry {
+    let mut g = Geometry::default();
+    if def.positions.len() != 4 || def.uvs.len() < 3 {
+        return g;
+    }
+    let [left, bottom, right, top] = borders;
+    let [tx, ty] = def.texel_size;
+    let p = &def.positions;
+    let width = p[1][0] - p[0][0];
+    let height = p[2][1] - p[0][1];
+    let top_h = top * height;
+    let bottom_h = bottom * height;
+    let right_w = right * width;
+    let left_w = left * width;
+    let size = [dimensions[0] * tx, dimensions[1] * ty];
+    let mut origin = [0.0f32; 2];
+    match anchor {
+        1 | 4 | 7 => origin[0] = -((dimensions[0] / 2.0) as i32 as f32),
+        2 | 5 | 8 => origin[0] = -(dimensions[0] as i32 as f32),
+        _ => {}
+    }
+    match anchor {
+        3..=5 => origin[1] = -((dimensions[1] / 2.0) as i32 as f32),
+        6..=8 => origin[1] = -(dimensions[1] as i32 as f32),
+        _ => {}
+    }
+    origin[0] *= tx;
+    origin[1] *= ty;
+    let uv = &def.uvs;
+    let du = [uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]];
+    let dv = [uv[2][0] - uv[0][0], uv[2][1] - uv[0][1]];
+    let rows_y = [0.0, bottom_h, size[1] - top_h, size[1]];
+    let rows_v = [0.0, bottom, 1.0 - top, 1.0];
+    let cols_x = [0.0, left_w, size[0] - right_w, size[0]];
+    let cols_u = [0.0, left, 1.0 - right, 1.0];
+    let (_, mirrored) = normal_matrix(&world.m);
+    let color = color32(color);
+    for i in 0..4 {
+        let row_uv = [uv[0][0] + dv[0] * rows_v[i], uv[0][1] + dv[1] * rows_v[i]];
+        for j in 0..4 {
+            let local = [(origin[0] + cols_x[j]) * scale[0], (origin[1] + rows_y[i]) * scale[1], 0.0];
+            g.positions.push(world.transform_point(local));
+            g.normals.push(BACK);
+            g.uvs.push([row_uv[0] + du[0] * cols_u[j], row_uv[1] + du[1] * cols_u[j]]);
+            g.colors.push(color);
+        }
+    }
+    let count = if border_only { 48 } else { 54 };
+    for tri in SLICED_INDICES[..count].chunks_exact(3) {
+        if mirrored {
+            g.indices.extend([tri[0], tri[2], tri[1]]);
+        } else {
+            g.indices.extend_from_slice(tri);
+        }
+    }
+    g
+}
+
 /// A level sprite's mesh, plain or tiled.
 pub fn scene_sprite_geometry(def: &SpriteDef, tiled: Option<&TiledLayout>, scale: [f32; 3], color: [f32; 4], world: &Affine) -> Geometry {
     match tiled {
@@ -312,25 +383,55 @@ pub struct Motion {
     pub parallax: Option<Parallax>,
     /// `ScaleSpriteWithCameraDistance.factor`.
     pub scale_with_camera: Option<f32>,
+    /// The sprite rides on a body moved by the game (a `HorizontalScroller2D` cloud): the index
+    /// of that body's offset in the frame's offsets ([`Motion::apply_with`]).
+    pub follow: Option<usize>,
+}
+
+/// `FakeParallax.Update` as a world translation of everything below the parallax object.
+pub fn parallax_delta(p: &Parallax, camera: Vec3) -> [f32; 3] {
+    let moved = fake_parallax_local_position(p, camera);
+    p.parent_world.transform_vector([moved[0] - p.local_position[0], moved[1] - p.local_position[1], moved[2] - p.local_position[2]])
+}
+
+/// `g` moved by `d`.
+pub fn translated(g: &Geometry, d: [f32; 3]) -> Geometry {
+    let mut g = g.clone();
+    if d != [0.0; 3] {
+        for p in &mut g.positions {
+            for k in 0..3 {
+                p[k] += d[k];
+            }
+        }
+    }
+    g
 }
 
 impl Motion {
     pub fn of(sprite: &SceneSprite) -> Motion {
-        Motion { parallax: sprite.parallax, scale_with_camera: sprite.scale_with_camera }
+        Motion { parallax: sprite.parallax, scale_with_camera: sprite.scale_with_camera, follow: None }
     }
 
     pub fn is_still(&self) -> bool {
-        self.parallax.is_none() && self.scale_with_camera.is_none()
+        self.parallax.is_none() && self.scale_with_camera.is_none() && self.follow.is_none()
     }
 
     /// The sprite's world transform and `scale` this frame, from its serialized ones and the
     /// main camera's position.
     pub fn apply(&self, world: &Affine, scale: [f32; 3], camera: Vec3) -> (Affine, [f32; 3]) {
+        self.apply_with(world, scale, camera, &[])
+    }
+
+    /// [`Motion::apply`] with the frame's body offsets (x, y) for followed sprites.
+    pub fn apply_with(&self, world: &Affine, scale: [f32; 3], camera: Vec3, offsets: &[[f32; 2]]) -> (Affine, [f32; 3]) {
         let mut world = *world;
         let mut scale = scale;
+        if let Some(d) = self.follow.and_then(|i| offsets.get(i)) {
+            world.t[0] += d[0];
+            world.t[1] += d[1];
+        }
         if let Some(p) = &self.parallax {
-            let moved = fake_parallax_local_position(p, camera);
-            let delta = p.parent_world.transform_vector([moved[0] - p.local_position[0], moved[1] - p.local_position[1], moved[2] - p.local_position[2]]);
+            let delta = parallax_delta(p, camera);
             for k in 0..3 {
                 world.t[k] += delta[k];
             }
@@ -511,7 +612,12 @@ pub struct MovingSprite {
 
 impl MovingSprite {
     pub fn geometry(&self, camera: Vec3) -> Geometry {
-        let (world, scale) = self.motion.apply(&self.world, self.scale, camera);
+        self.geometry_with(camera, &[])
+    }
+
+    /// The mesh this frame, with followed bodies at `offsets`.
+    pub fn geometry_with(&self, camera: Vec3, offsets: &[[f32; 2]]) -> Geometry {
+        let (world, scale) = self.motion.apply_with(&self.world, self.scale, camera, offsets);
         scene_sprite_geometry(&self.def, self.tiled.as_ref(), scale, self.color, &world)
     }
 }
@@ -539,7 +645,12 @@ impl LevelShadow {
     /// caster's transform), scaled by the shadow scale, black with the caster's alpha. `camera`
     /// moves casters that follow it.
     pub fn geometry(&self, light: Vec3, camera: Vec3) -> Geometry {
-        let (caster_world, caster_scale) = self.caster_motion.apply(&self.caster_world, self.caster_scale, camera);
+        self.geometry_with(light, camera, &[])
+    }
+
+    /// [`LevelShadow::geometry`] with followed casters at `offsets`.
+    pub fn geometry_with(&self, light: Vec3, camera: Vec3, offsets: &[[f32; 2]]) -> Geometry {
+        let (caster_world, caster_scale) = self.caster_motion.apply_with(&self.caster_world, self.caster_scale, camera, offsets);
         let caster = Vec3::new(caster_world.t[0], caster_world.t[1], caster_world.t[2]);
         let (delta, k) = shadow_offset_and_scale(light, caster, self.plane_z);
         let local = self.caster_rotation.conjugate() * Vec3::new(delta[0], delta[1], SHADOW_DEPTH);
@@ -583,6 +694,18 @@ impl LevelArt {
     pub fn build<'a>(
         scene: &[SceneSprite],
         skip: impl Fn(&SceneSprite) -> bool,
+        library: impl FnMut(&str) -> Option<&'a SpriteLibrary>,
+        texture: impl FnMut(&std::path::Path) -> u32,
+    ) -> LevelArt {
+        Self::build_following(scene, skip, |_| None, library, texture)
+    }
+
+    /// [`LevelArt::build`] where `follow` names, for sprites riding on a game-moved body, that
+    /// body's index in the frame offsets (see [`Motion::follow`]).
+    pub fn build_following<'a>(
+        scene: &[SceneSprite],
+        skip: impl Fn(&SceneSprite) -> bool,
+        follow: impl Fn(&SceneSprite) -> Option<usize>,
         mut library: impl FnMut(&str) -> Option<&'a SpriteLibrary>,
         mut texture: impl FnMut(&std::path::Path) -> u32,
     ) -> LevelArt {
@@ -596,7 +719,8 @@ impl LevelArt {
                 None => {
                     let Some(def) = lib.collection.sprites.get(sprite.sprite_id) else { continue };
                     let Some(path) = lib.texture_of(def) else { continue };
-                    let motion = Motion::of(sprite);
+                    let mut motion = Motion::of(sprite);
+                    motion.follow = follow(sprite);
                     if !motion.is_still() {
                         art.moving.push(MovingSprite {
                             texture: texture(path),
@@ -643,7 +767,7 @@ impl LevelArt {
                         texture: texture(path),
                         def: def.clone(),
                         tiled,
-                        caster_motion: Motion::of(caster),
+                        caster_motion: Motion { follow: follow(caster), ..Motion::of(caster) },
                         caster_world: caster.world,
                         caster_rotation: Quat::from_array(caster.world_rotation),
                         caster_scale: caster.scale,
@@ -656,6 +780,67 @@ impl LevelArt {
         }
         art
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Built-in meshes
+// ---------------------------------------------------------------------------------------------
+
+/// A built-in mesh (`unity_data::scenery::BuiltinMesh`) placed by `world`, white, with the
+/// mesh's UVs and normals turned into the world. Unity's "Plane" is 10 × 10 in local x/z with
+/// 11 × 11 vertices (normal +y); the "Quad" 1 × 1 in local x/y (normal -z). Triangles are
+/// emitted clockwise as seen along the normal's opposite (Unity's front faces).
+/// TODO(UNCERTAIN): the built-in plane's UV orientation (u, v = 1 - (x + 5) / 10, 1 - (z + 5) / 10)
+/// and vertex order are from memory of Unity's primitive; only untextured planes ("Color
+/// Polygon") are drawn with it so far.
+pub fn builtin_mesh_geometry(mesh: unity_data::scenery::BuiltinMesh, world: &Affine) -> Geometry {
+    use unity_data::scenery::BuiltinMesh;
+    let mut g = Geometry::default();
+    let (n, size, normal): (usize, f32, [f32; 3]) = match mesh {
+        BuiltinMesh::Plane => (11, 10.0, [0.0, 1.0, 0.0]),
+        BuiltinMesh::Quad => (2, 1.0, [0.0, 0.0, -1.0]),
+    };
+    let world_normal = {
+        let v = world.transform_vector(normal);
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-12);
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    for j in 0..n {
+        for i in 0..n {
+            let a = i as f32 / (n - 1) as f32;
+            let b = j as f32 / (n - 1) as f32;
+            let local = match mesh {
+                BuiltinMesh::Plane => [(a - 0.5) * size, 0.0, (b - 0.5) * size],
+                BuiltinMesh::Quad => [(a - 0.5) * size, (b - 0.5) * size, 0.0],
+            };
+            g.positions.push(world.transform_point(local));
+            g.normals.push(world_normal);
+            g.uvs.push(match mesh {
+                BuiltinMesh::Plane => [1.0 - a, 1.0 - b],
+                BuiltinMesh::Quad => [a, b],
+            });
+            g.colors.push([1.0; 4]);
+        }
+    }
+    // Front faces: clockwise seen from the side the normal points to.
+    let toward = [-world_normal[0], -world_normal[1], -world_normal[2]];
+    for j in 0..n - 1 {
+        for i in 0..n - 1 {
+            let k = (j * n + i) as u32;
+            let quad = [k, k + 1, k + n as u32 + 1, k + n as u32];
+            for tri in [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]] {
+                let (p0, p1, p2) = (g.positions[tri[0] as usize], g.positions[tri[1] as usize], g.positions[tri[2] as usize]);
+                let u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+                let v = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+                let cross = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+                // The level's front faces (sprites, surfaces facing -z) are clockwise in x/y, i.e.
+                // their (right-handed) cross product points along the normal, against `toward`.
+                let dot = cross[0] * toward[0] + cross[1] * toward[1] + cross[2] * toward[2];
+                if dot > 0.0 { g.indices.extend([tri[0], tri[2], tri[1]]) } else { g.indices.extend(tri) }
+            }
+        }
+    }
+    g
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -727,6 +912,10 @@ pub struct Entry {
     /// `Renderer.bounds.center`.
     pub center: Vec3,
     pub source: Source,
+    /// The renderer's sorting layer (its rank in the project's list) and `sortingOrder`: Unity
+    /// sorts transparent renderers by these before their depth. 0 for the levels' renderers,
+    /// which all sit on one layer.
+    pub sorting: (i32, i32),
 }
 
 /// One frame's transparent queue.
@@ -770,23 +959,32 @@ impl DrawQueue {
         if geometry.is_empty() {
             return;
         }
+        self.push_frame_sorted(texture, geometry, (0, 0));
+    }
+
+    /// [`Self::push_frame`] for a renderer on sorting layer rank `sorting.0` with
+    /// `sortingOrder` `sorting.1`.
+    pub fn push_frame_sorted(&mut self, texture: u32, geometry: Geometry, sorting: (i32, i32)) {
+        if geometry.is_empty() {
+            return;
+        }
         let center = geometry.bounds_center();
-        self.entries.push(Entry { texture, center, source: Source::Frame(self.frame.len()) });
+        self.entries.push(Entry { texture, center, source: Source::Frame(self.frame.len()), sorting });
         self.frame.push(geometry);
     }
 
     /// Queue a static renderer.
     pub fn push_static(&mut self, texture: u32, center: Vec3, index: usize) {
-        self.entries.push(Entry { texture, center, source: Source::Static(index) });
+        self.entries.push(Entry { texture, center, source: Source::Static(index), sorting: (0, 0) });
     }
 
-    /// The transparent sort: deepest bounds centre (along the view axis, +z) first, stable for
-    /// ties.
+    /// The transparent sort: by sorting layer and order, then deepest bounds centre (along the
+    /// view axis, +z) first, stable for ties.
     pub fn sort(&mut self, camera: Vec3) {
         self.entries.sort_by(|a, b| {
             let da = a.center.z - camera.z;
             let db = b.center.z - camera.z;
-            db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+            a.sorting.cmp(&b.sorting).then(db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal))
         });
     }
 
@@ -839,6 +1037,43 @@ mod tests {
             untrimmed_bounds: [[0.0; 3], [2.0, 2.0, 0.0]],
             bounds: [[0.0; 3], [2.0, 2.0, 0.0]],
             flipped: 0,
+        }
+    }
+
+    #[test]
+    fn sliced_sprite_keeps_its_corners() {
+        // 2×2 units = 4×4 texels; a 20×10 texel box centred (anchor 4), quarter borders.
+        let g = sliced_sprite_geometry(&quad_def(), [1.0; 3], [20.0, 10.0], [0.25; 4], 4, false, [1.0; 4], &Affine::IDENTITY);
+        assert_eq!(g.positions.len(), 16);
+        assert_eq!(g.indices.len(), 54);
+        assert_eq!(g.positions[0], [-5.0, -2.5, 0.0]);
+        assert_eq!(g.positions[15], [5.0, 2.5, 0.0]);
+        // The corner cells keep the definition's border size (0.25 × 2 units).
+        assert_eq!(g.positions[5], [-4.5, -2.0, 0.0]);
+        assert_eq!(g.uvs[5], [0.25, 0.25]);
+        assert_eq!(g.uvs[15], [1.0, 1.0]);
+        let border = sliced_sprite_geometry(&quad_def(), [1.0; 3], [20.0, 10.0], [0.25; 4], 0, true, [1.0; 4], &Affine::IDENTITY);
+        assert_eq!(border.indices.len(), 48);
+        assert_eq!(border.positions[0], [0.0, 0.0, 0.0], "lower-left anchor");
+    }
+
+    #[test]
+    fn builtin_plane_turned_to_the_camera() {
+        // Japan's sky plane: rotated -90° about x, scaled 20 × 20.
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        let world = Affine::from_trs([0.0, 0.0, 0.4], (h, 0.0, 0.0, -h), [20.0, 1.0, 20.0]);
+        let g = builtin_mesh_geometry(unity_data::scenery::BuiltinMesh::Plane, &world);
+        assert_eq!(g.positions.len(), 121);
+        assert_eq!(g.indices.len(), 600);
+        // It spans ±100 in x and y at z 0.4, facing -z.
+        let (min_y, max_y) = g.positions.iter().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p[1]), b.max(p[1])));
+        assert!((min_y + 100.0).abs() < 1e-3 && (max_y - 100.0).abs() < 1e-3);
+        assert!(g.positions.iter().all(|p| (p[2] - 0.4).abs() < 1e-4));
+        assert!((g.normals[0][2] + 1.0).abs() < 1e-5);
+        // Clockwise in x/y like the level's other front faces.
+        for t in g.indices.chunks(3) {
+            let (a, b, c) = (g.positions[t[0] as usize], g.positions[t[1] as usize], g.positions[t[2] as usize]);
+            assert!((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < 0.0);
         }
     }
 
@@ -913,7 +1148,7 @@ mod tests {
         let x_only = fake_parallax_local_position(&Parallax { x_only: true, ..p }, Vec3::new(100.0, 20.0, -30.0));
         assert_eq!(x_only[1], -86.0);
         // The sprite moves with its parallax object; the camera-scaled one grows past its minimum.
-        let motion = Motion { parallax: Some(p), scale_with_camera: Some(0.045) };
+        let motion = Motion { parallax: Some(p), scale_with_camera: Some(0.045), follow: None };
         let world = Affine::from_trs([81.3, -41.2, 0.2], (0.0, 0.0, 0.0, 1.0), [1.0; 3]);
         let (w, s) = motion.apply(&world, [2.0, 2.0, 1.0], Vec3::new(100.0, 20.0, -60.0));
         assert!((w.t[0] - (81.3 + moved[0] - 81.3)).abs() < 1e-3);

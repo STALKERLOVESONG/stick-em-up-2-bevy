@@ -1,0 +1,8 @@
+[package]
+name = "sticks_net"
+description = "Stick 'Em Up 2 LAN play: server discovery, the framed connection and the message codec (std only)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

@@ -258,6 +258,7 @@ mod tests {
             axis_y: [0.0, 1.0],
             shadow_plane_z: None,
             maximum_triangle_area: area,
+            parallax: None,
         }
     }
 

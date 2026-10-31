@@ -104,6 +104,12 @@ fn spawn_level_texts(
     let mut letters = Vec::new();
     let mut texts = Vec::new();
     for text in &level.0.texts {
+        // Layer 5 ("UI") texts are only seen by the UI camera.
+        // TODO: draw the level's own UI-layer texts (Office's "Enemies Remaining UI", Moon
+        // Race's "Timing UI") with the HUD.
+        if text.layer == 5 {
+            continue;
+        }
         for guid in std::iter::once(&text.text.font).chain(text.shadower.as_ref().and_then(|s| s.0.as_ref())) {
             if !font_textures.contains_key(guid) {
                 if let Some(path) = fonts.get(guid).and_then(|f| f.texture.clone()) {

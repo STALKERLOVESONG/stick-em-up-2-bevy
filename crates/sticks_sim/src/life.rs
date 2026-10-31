@@ -168,6 +168,11 @@ impl Lives {
     }
 
     /// May go negative: below zero is game over.
+    /// Development hook (not in the original): set the lives left.
+    pub fn set_remaining(&mut self, remaining: i32) {
+        self.remaining = remaining;
+    }
+
     pub fn remaining(&self) -> i32 {
         self.remaining
     }
@@ -198,6 +203,18 @@ impl Score {
 
     pub fn frags_against(&self, player_index: usize) -> i32 {
         self.frags_against[player_index]
+    }
+
+    /// The frags against every player index.
+    pub fn all_frags_against(&self) -> [i32; 4] {
+        self.frags_against
+    }
+
+    /// `PlayerScore.ReceivePlayerScore`: the server's figures replace this peer's.
+    pub fn receive(&mut self, damage_dealt: f32, frags: i32, frags_against: [i32; 4]) {
+        self.damage_dealt = damage_dealt;
+        self.frags = frags;
+        self.frags_against = frags_against;
     }
 
     pub fn fragged(&mut self, player_index: usize) {

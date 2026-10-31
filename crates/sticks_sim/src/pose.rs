@@ -189,7 +189,9 @@ impl ClipPose {
     /// the pose" are root motion (consumed by the controller through the animator's
     /// `delta_position`), so the pose keeps their value at the start of the clip.
     /// TODO(UNCERTAIN): Unity's reference for "Based Upon: Original" is assumed to be the clip
-    /// start; the orientation offset is assumed to add to the clip's heading.
+    /// start. The orientation offset turns the clip's heading back: only Idle has one (20° against
+    /// a 29° heading), and the original shows its standing figure close to side-on, both legs
+    /// coming out of one point, which a 9° turn gives and a 49° one does not.
     pub fn sample(&self, normalized: f32) -> HumanPose {
         let n = if self.looping { normalized - normalized.floor() } else { normalized.clamp(0.0, 1.0) };
         let time = n * self.length;
@@ -209,7 +211,7 @@ impl ClipPose {
         // Swing-twist split about the vertical axis: `q = heading * rest`.
         let heading = Quat::new(0.0, q.y, 0.0, q.w).normalized();
         pose.root_q = if self.settings.bake_orientation {
-            Quat::euler_y_degrees(self.settings.orientation_offset_y) * q
+            Quat::euler_y_degrees(-self.settings.orientation_offset_y) * q
         } else {
             heading.conjugate() * q
         };
@@ -249,12 +251,15 @@ impl RigPose {
     }
 }
 
+/// Mecanim's `ZYRoll2Quat` of the half-angle tangents: one swing about the axis (0, ty, tz)
+/// followed by the roll (twist) about the bone's x axis, `(tx, ty + tx·tz, tz − tx·ty, 1)`
+/// normalized.
+/// TODO(UNCERTAIN): recalled from Mecanim's `AxesUnproject` → `ZYRoll2Quat(halfTan(..))`, not
+/// recovered from data; every muscle axis of the `Man` avatar has `m_Type` 1 (ZY-roll). With one
+/// axis at a time it equals the sequential z·y·x rotations used before.
 fn axis_rotation(angles: [f32; 3]) -> Quat {
-    // `ZYRoll`: swing about z, then y, then roll (twist) about the bone's x axis.
-    // TODO(UNCERTAIN): the composition order of the three axis rotations is recalled from
-    // Mecanim's `ZYRoll` helper, not recovered from data. Twist (x) is invisible to the
-    // stick-figure lines because every child lies on the bone axis.
-    Quat::about_z(angles[2]) * Quat::about_y(angles[1]) * Quat::about_x(angles[0])
+    let t = angles.map(|a| (0.5 * a).tan());
+    Quat::new(t[0], t[1] + t[0] * t[2], t[2] - t[0] * t[1], 1.0).normalized()
 }
 
 impl CharacterRigModel {

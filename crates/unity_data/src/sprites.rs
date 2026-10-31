@@ -267,7 +267,7 @@ pub(crate) fn world_rotation_of(go: crate::scene::GameObject<'_>) -> [f32; 4] {
 }
 
 /// The nearest enabled `FakeParallax` on the object or an ancestor.
-fn parallax_of<'s>(go: crate::scene::GameObject<'_>, class_of: &dyn Fn(&crate::yaml::Document) -> Option<&'s str>) -> Option<Parallax> {
+pub(crate) fn parallax_of<'s>(go: crate::scene::GameObject<'_>, class_of: &dyn Fn(&crate::yaml::Document) -> Option<&'s str>) -> Option<Parallax> {
     let mut current = Some(go);
     while let Some(o) = current {
         if let Some(p) = o.components().iter().find(|c| class_of(c) == Some("FakeParallax") && c.body.bool_of("m_Enabled").unwrap_or(true)) {
@@ -389,6 +389,56 @@ pub fn scene_sprites_with(scene: &Scene, scripts: &ScriptIndex, include_inactive
         sprites.push(shadow);
     }
     sprites
+}
+
+/// A `tk2dSlicedSprite` (nine-sliced box: the menus' panels and button backgrounds).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneSlicedSprite {
+    pub object: crate::scene::FileId,
+    pub collection: String,
+    pub sprite_id: usize,
+    /// `_color`.
+    pub color: [f32; 4],
+    /// `_scale`.
+    pub scale: [f32; 3],
+    /// `_dimensions` in texels.
+    pub dimensions: [f32; 2],
+    /// `_anchor` (`tk2dBaseSprite.Anchor`: 0 lower-left ... 8 upper-right).
+    pub anchor: i64,
+    /// `borderLeft`, `borderBottom`, `borderRight`, `borderTop` (fractions of the sprite).
+    pub borders: [f32; 4],
+    /// `_borderOnly`: the centre cell is left out.
+    pub border_only: bool,
+}
+
+/// Every enabled `tk2dSlicedSprite` with an enabled `MeshRenderer`, also under inactive objects
+/// (the menus are switched on and off).
+pub fn scene_sliced_sprites(scene: &Scene, scripts: &ScriptIndex) -> Vec<SceneSlicedSprite> {
+    let class_of = |doc: &crate::yaml::Document| doc.body.get("m_Script").and_then(Value::guid).and_then(|g| scripts.class_name(g));
+    let mut out = Vec::new();
+    for go in scene.game_objects() {
+        let components = go.components();
+        let renderer_on = components.iter().find(|c| c.class_id == class::MESH_RENDERER).is_some_and(|r| r.body.bool_of("m_Enabled").unwrap_or(true));
+        let Some(sprite) = components.iter().find(|c| class_of(c) == Some("tk2dSlicedSprite")) else { continue };
+        if !renderer_on || !sprite.body.bool_of("m_Enabled").unwrap_or(true) {
+            continue;
+        }
+        let b = &sprite.body;
+        let Some(collection) = b.get("collection").and_then(Value::guid) else { continue };
+        let c = b.get("_color");
+        out.push(SceneSlicedSprite {
+            object: go.id(),
+            collection: collection.to_owned(),
+            sprite_id: b.i64_of("_spriteId").unwrap_or(0).max(0) as usize,
+            color: ["r", "g", "b", "a"].map(|k| c.and_then(|c| c.f32_of(k)).unwrap_or(1.0)),
+            scale: b.get("_scale").and_then(Value::as_vec3).map_or([1.0; 3], |(x, y, z)| [x, y, z]),
+            dimensions: b.get("_dimensions").and_then(Value::as_vec2).map_or([50.0, 50.0], |(x, y)| [x, y]),
+            anchor: b.i64_of("_anchor").unwrap_or(0),
+            borders: ["borderLeft", "borderBottom", "borderRight", "borderTop"].map(|k| b.f32_of(k).unwrap_or(0.2)),
+            border_only: b.bool_of("_borderOnly").unwrap_or(false),
+        });
+    }
+    out
 }
 
 /// Find, among the collections the scene's sprites use, the first that contains every

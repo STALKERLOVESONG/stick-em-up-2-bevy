@@ -1,4 +1,4 @@
-//! The player character: input devices → `CharacterInput`, then the simulation steps.
+//! The player characters: input devices → `CharacterInput`, then the simulation steps.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
@@ -13,17 +13,42 @@ use crate::life::{ExplosionWarmup, Mortal, PlayerLives, PlayerScore};
 use crate::state::{AppState, GameMode, Session};
 use crate::weapon::{AimPivot, Team};
 use sticks_sim::life::{LifeCycle, Lives, Score};
-use sticks_sim::lobby::{MAX_PLAYERS, assign_spawn_points, player_palette, spawns, team_index};
+use sticks_sim::lobby::{MAX_PLAYERS, assign_spawn_points, spawn_palette, spawns, team_index};
 use sticks_sim::rng::GameRng;
 use crate::figure::Palette;
+use crate::input::{Gamepads, InputDevice, MouseActivity};
 use crate::FrameSet;
+use sticks_sim::devices::{CharacterControls, ProcessorStatus, RoleInputChoice, keyboard_character_status};
 
 /// A player slot: the original's `Player` object. It owns lives and score and controls one
 /// avatar (see [`ControlledBy`]).
 #[derive(Component)]
 pub struct Player {
     pub index: usize,
+    /// `Player.TeamIndex` (the player index in Versus, its `LobbyTeams` team in Team Versus,
+    /// 0 in the campaign).
+    pub team: usize,
 }
+
+/// The processors of a player's role inputs (`PlayerSpawner.Spawn` → `RoleInput.AddProcessor`)
+/// and its `CharacterInput`'s current processor.
+#[derive(Component, Debug, Clone)]
+pub struct PlayerDevices {
+    pub devices: Vec<InputDevice>,
+    character: RoleInputChoice,
+    /// The `HelicopterInput`'s current processor while the player flies.
+    pub(crate) helicopter: RoleInputChoice,
+}
+
+impl PlayerDevices {
+    pub fn new(devices: Vec<InputDevice>) -> Self {
+        Self { devices, character: RoleInputChoice::default(), helicopter: RoleInputChoice::default() }
+    }
+}
+
+/// `CharacterInput.EnterVehicle`: the enter/exit button went down this frame.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct EnterVehiclePressed(pub bool);
 
 /// `ControlSlot.Controller`: the player slot driving this avatar.
 #[derive(Component, Clone, Copy)]
@@ -32,6 +57,14 @@ pub struct ControlledBy(pub Entity);
 /// An avatar's physics trigger entered this frame (`OnTriggerEnter2D`).
 #[derive(Message, Debug, Clone, Copy)]
 pub struct TriggerEntered {
+    pub avatar: Entity,
+    /// Index into the level's collider list.
+    pub collider: u32,
+}
+
+/// An avatar's physics trigger was left this frame (`OnTriggerExit2D`).
+#[derive(Message, Debug, Clone, Copy)]
+pub struct TriggerExited {
     pub avatar: Entity,
     /// Index into the level's collider list.
     pub collider: u32,
@@ -67,6 +100,8 @@ const SCROLL_CHANGE_INTERVAL: f32 = 0.1;
 const SCROLL_THRESHOLD: f32 = 0.04;
 /// `Keyboard.WalkModifier` scales movement input.
 const WALK_MODIFIER_FACTOR: f32 = 0.2;
+/// `Keyboard.EnterVehiclePressedThisFrame` (= `ExitVehiclePressedThisFrame`).
+pub const ENTER_OR_EXIT_KEY: KeyCode = KeyCode::KeyE;
 
 pub struct PlayerPlugin;
 
@@ -75,6 +110,7 @@ impl Plugin for PlayerPlugin {
         app.init_resource::<FrameClock>()
             .add_systems(OnEnter(AppState::Loading), reset_clock)
             .add_message::<TriggerEntered>()
+            .add_message::<TriggerExited>()
             .add_systems(OnEnter(AppState::InGame), spawn_player)
             .add_systems(Update, begin_frame.in_set(FrameSet::Input))
             .add_systems(Update, read_player_input.in_set(FrameSet::RoleInput))
@@ -95,62 +131,85 @@ fn spawn_player(
     collision: Res<Collision>,
     animation: Res<CharacterAnimation>,
     session: Res<Session>,
+    memory: Res<crate::lobby::LobbyMemory>,
+    net: Res<crate::net::Net>,
 ) {
-    // `PlayerSlotAssignments.OnLoadedLevelEverywhere` → `PlayerSpawner.SpawnAll` → `Spawn`: the
-    // local player's slot takes the next spawn point (shuffled outside the campaign or with
-    // `RandomizeSpawnPoints`; `System.Random` is time-seeded, so any seed is faithful).
-    let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(11, |d| d.subsec_nanos());
+    // `PlayerSlotAssignments.OnLoadedLevelEverywhere` → `PlayerSpawner.SpawnAll` → `Spawn`: every
+    // slot with controls takes the next spawn point (shuffled outside the campaign or with
+    // `RandomizeSpawnPoints`; `System.Random` is time-seeded, so any seed is faithful). In a
+    // network game the host's seed makes every machine draw the same points and faces (the
+    // original's server sent the indices).
+    let seed = net.level_seed.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(11, |d| d.subsec_nanos()));
     let mut rng = GameRng::from_seed(seed);
     let points = &level.0.spawn_points;
     let mut active = [false; MAX_PLAYERS];
-    active[session.player_index.min(MAX_PLAYERS - 1)] = true;
+    for p in &session.players {
+        if p.index < MAX_PLAYERS && (p.remote || !p.devices.is_empty()) {
+            active[p.index] = true;
+        }
+    }
     let shuffle = session.mode != GameMode::Campaign || level.0.randomize_spawn_points;
     let indices = assign_spawn_points(points.len(), active, shuffle, |i, n| rng.range_int(i as i32, n as i32) as usize);
-    let Some((index, child)) = spawns(indices, points.len()).into_iter().next() else {
+    let spawned = spawns(indices, points.len());
+    if spawned.is_empty() {
         error!("level {} has no player spawn points", level.0.name);
-        return;
-    };
-    let Some(spawn) = points.iter().find(|p| p.index == child) else { return };
-    let team_versus = (session.mode == GameMode::TeamVersus).then_some(&session.teams);
-    let team = team_index(session.mode == GameMode::Versus, session.mode == GameMode::TeamVersus, index, &session.teams);
-    let palette = player_palette(index, team_versus, &mut rng);
-    // The `Player` object: lives exist in campaign mode only (`Player.SetUp` destroys them
-    // otherwise).
-    let mut slot = commands.spawn((Player { index }, PlayerScore(Score::default())));
-    let campaign = session.mode == GameMode::Campaign;
-    if campaign {
-        slot.insert(PlayerLives(Lives::new(sticks_sim::life::PLAYER_STARTING_LIVES, session.difficulty)));
     }
-    let slot = slot.id();
+    for (index, child) in spawned {
+        let Some(spawn) = points.iter().find(|p| p.index == child) else { continue };
+        let team_versus = (session.mode == GameMode::TeamVersus).then_some(&session.teams);
+        let team = team_index(session.mode == GameMode::Versus, session.mode == GameMode::TeamVersus, index, &session.teams);
+        // `ControlAssignment.GetPlayerColors` with the defaults filled in.
+        // A remote player's colours are what its machine sent (`RemoteColorAssignments`).
+        let remote = session.is_remote(index);
+        let colors = if remote { net.colors[index] } else { memory.player_colors(index) };
+        let palette = spawn_palette(index, &colors, team_versus, &mut rng);
+        // The `Player` object: lives exist in campaign mode only (`Player.SetUp` destroys them
+        // otherwise); its role inputs get the processors of the slot's control types.
+        let devices = session.devices(index).to_vec();
+        let mut slot = commands.spawn((Player { index, team }, PlayerScore(Score::default()), PlayerDevices::new(devices)));
+        if !remote {
+            slot.insert(crate::net::LocalPlayer);
+        }
+        let campaign = session.mode == GameMode::Campaign;
+        if campaign {
+            slot.insert(PlayerLives(Lives::new(sticks_sim::life::PLAYER_STARTING_LIVES, session.difficulty)));
+        }
+        let slot = slot.id();
 
-    let mut character = Character::new(
-        animation.0.clone(),
-        &collision.rules,
-        StandingColliders::MAN,
-        SimVec2::new(spawn.position[0], spawn.position[1]),
-    );
-    character.set_facing_right(spawn.facing_right);
-    // `Player.SetUp`: `SetLayer(avatar, Utility.Layers.Team(TeamIndex))`.
-    character.body.layer = (8 + team) as u8;
-    let aim = SimVec2::new(if spawn.facing_right { 1.0 } else { -1.0 }, 0.0);
-    let mut life = LifeCycle::man();
-    if campaign {
-        // `Player.SetUp` → `Health.LinkTo(lives)` while the player has no avatar yet.
-        life.health.link_to_lives();
-    }
-    let avatar = commands.spawn((
-        Avatar(character),
-        Controls(CharacterInput { aim, ..CharacterInput::default() }),
-        Team(team as i32),
-        Mortal(life),
-        ExplosionWarmup(1),
-        ControlledBy(slot),
-        CameraPlaceholder::default(),
-        Transform::from_xyz(spawn.position[0], spawn.position[1], -DEFAULT_Z),
-    )).id();
-    // `Player.SetUp` → `CharacterColor.SetColors` with the slot's colours.
-    if let Some(palette) = palette {
-        commands.entity(avatar).insert(Palette(palette));
+        let mut character = Character::new(
+            animation.0.clone(),
+            &collision.rules,
+            StandingColliders::MAN,
+            SimVec2::new(spawn.position[0], spawn.position[1]),
+        );
+        character.set_facing_right(spawn.facing_right);
+        // `Player.SetUp`: `SetLayer(avatar, Utility.Layers.Team(TeamIndex))`.
+        character.body.layer = (8 + team) as u8;
+        let aim = SimVec2::new(if spawn.facing_right { 1.0 } else { -1.0 }, 0.0);
+        let mut life = LifeCycle::man();
+        if campaign {
+            // `Player.SetUp` → `Health.LinkTo(lives)` while the player has no avatar yet.
+            life.health.link_to_lives();
+        }
+        let avatar = commands
+            .spawn((
+                Avatar(character),
+                Controls(CharacterInput { aim, ..CharacterInput::default() }),
+                EnterVehiclePressed::default(),
+                Team(team as i32),
+                Mortal(life),
+                ExplosionWarmup(1),
+                ControlledBy(slot),
+                crate::net::NetObject { id: sticks_net::NetId::Player(index as u8), local: !remote },
+                CameraPlaceholder::default(),
+                Transform::from_xyz(spawn.position[0], spawn.position[1], -DEFAULT_Z),
+            ))
+            .id();
+        // `Player.SetUp` → `CharacterColor.SetColors` with the slot's colours.
+        if let Some(palette) = palette {
+            commands.entity(avatar).insert(Palette(palette));
+        }
+        info!("player {} spawned (team {team}) with {:?}", index + 1, session.devices(index));
     }
 }
 
@@ -159,21 +218,27 @@ fn begin_frame(time: Res<Time>, mut clock: ResMut<FrameClock>) {
     clock.time += clock.stepper.frame().delta;
 }
 
-/// `CharacterInput.Update` with the `KeyboardAndMouseCharacterInput` processor: A/D move
-/// (LeftShift walks), Space jumps, S ducks, the left mouse button fires, Z or the wheel changes
-/// weapon, the mouse aims.
+/// `CharacterInput.Update` (`RoleInput.Update` + `OwnerOnlyUpdate`) for every player avatar:
+/// the player's processors run in order until one is active (`KeyboardAndMouseCharacterInput`:
+/// A/D move (LeftShift walks), Space jumps, S ducks, the left mouse button fires, Z or the wheel
+/// changes weapon, E enters a vehicle, the mouse aims; `XboxishGamepadCharacterInput`: see
+/// `sticks_sim::devices`), the chosen one's values are copied; with none every value is
+/// cleared and the aim is `DefaultAim`.
 ///
 /// Runs in [`FrameSet::RoleInput`], after this frame's fixed steps: `CharacterControl2D.FixedUpdate`
 /// reads the input `CharacterInput` copied during the previous frame's `Update`.
-#[allow(clippy::too_many_arguments)]
-fn read_player_input(
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn read_player_input(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
     clock: Res<FrameClock>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<LevelCamera>>,
-    mut players: Query<(&Avatar, &mut Controls, Option<&AimPivot>), With<ControlledBy>>,
+    mut pads: ResMut<Gamepads>,
+    mouse: Res<MouseActivity>,
+    mut slots: Query<&mut PlayerDevices>,
+    mut players: Query<(&Avatar, &mut Controls, &mut EnterVehiclePressed, Option<&AimPivot>, &ControlledBy)>,
     mut since_scroll_change: Local<Option<f32>>,
     scripted_aim: Res<crate::devscript::ScriptedAim>,
 ) {
@@ -190,20 +255,74 @@ fn read_player_input(
         wheel_next = scroll.delta.y > 0.0;
         wheel_previous = !wheel_next;
     }
+    let keyboard = CharacterControls {
+        movement: horizontal * if walking { WALK_MODIFIER_FACTOR } else { 1.0 },
+        jump: keys.pressed(KeyCode::Space),
+        duck: vertical < 0.0,
+        fire: buttons.pressed(MouseButton::Left),
+        aim: SimVec2::new(1.0, 0.0),
+        next_weapon: keys.just_pressed(KeyCode::KeyZ) || wheel_next,
+        enter_vehicle: keys.just_pressed(ENTER_OR_EXIT_KEY),
+    };
+    let keyboard_status = keyboard_character_status(&keyboard, wheel_previous, mouse.moved_last_frame);
 
     let cursor_world = cursor_world(&windows, &cameras);
-    for (avatar, mut controls, pivot) in &mut players {
-        controls.movement = horizontal * if walking { WALK_MODIFIER_FACTOR } else { 1.0 };
-        controls.jump = keys.pressed(KeyCode::Space);
-        controls.duck = vertical < 0.0;
-        controls.fire = buttons.pressed(MouseButton::Left);
-        controls.next_weapon = keys.just_pressed(KeyCode::KeyZ) || wheel_next;
-        controls.previous_weapon = wheel_previous;
-        if let Some(offset) = scripted_aim.0 {
-            controls.aim = SimVec2::new(offset.x, offset.y);
-        } else if let Some(point) = cursor_world {
-            let origin = pivot.map_or_else(|| avatar.position() + SimVec2::new(0.0, WEAPON_PIVOT_HEIGHT), |p| p.0);
-            controls.aim = SimVec2::new(point.x - origin.x, point.y - origin.y);
+    for (avatar, mut controls, mut enter, pivot, controlled_by) in &mut players {
+        let Ok(mut devices) = slots.get_mut(controlled_by.0) else { continue };
+        let devices = &mut *devices;
+        let list = devices.devices.clone();
+        let mut outputs: Vec<Option<CharacterControls>> = vec![None; list.len()];
+        let current = devices.character.update(
+            list.len(),
+            |i| match list[i] {
+                InputDevice::KeyboardMouse => {
+                    outputs[i] = Some(keyboard);
+                    keyboard_status
+                }
+                InputDevice::Gamepad(k) => match pads.frame_mut(k) {
+                    None => ProcessorStatus::Unavailable,
+                    Some(f) => {
+                        outputs[i] = Some(f.character.process(&f.state, &f.edges));
+                        if f.state.is_active() { ProcessorStatus::Active } else { ProcessorStatus::Idle }
+                    }
+                },
+            },
+            |i| list[i].kind(),
+        );
+        let chosen = current.and_then(|i| outputs[i].map(|c| (list[i], c)));
+        let Some((device, c)) = chosen else {
+            // `currentProcessor == null`: everything cleared, `RelativeAim` → `DefaultAim`.
+            controls.movement = 0.0;
+            controls.jump = false;
+            controls.duck = false;
+            controls.fire = false;
+            controls.next_weapon = false;
+            controls.previous_weapon = false;
+            controls.aim = SimVec2::new(1.0, 0.0);
+            enter.0 = false;
+            continue;
+        };
+        controls.movement = c.movement;
+        controls.jump = c.jump;
+        controls.duck = c.duck;
+        controls.fire = c.fire;
+        controls.next_weapon = c.next_weapon;
+        enter.0 = c.enter_vehicle;
+        match device {
+            InputDevice::KeyboardMouse => {
+                controls.previous_weapon = wheel_previous;
+                if let Some(offset) = scripted_aim.0 {
+                    controls.aim = SimVec2::new(offset.x, offset.y);
+                } else if let Some(point) = cursor_world {
+                    // `AbsoluteAim - origin`.
+                    let origin = pivot.map_or_else(|| avatar.position() + SimVec2::new(0.0, WEAPON_PIVOT_HEIGHT), |p| p.0);
+                    controls.aim = SimVec2::new(point.x - origin.x, point.y - origin.y);
+                }
+            }
+            InputDevice::Gamepad(_) => {
+                controls.previous_weapon = false;
+                controls.aim = c.aim;
+            }
         }
     }
 }
@@ -225,6 +344,7 @@ pub fn run_fixed_steps(
     collision: Res<Collision>,
     mut avatars: Query<(Entity, &mut Avatar, &Controls, &Mortal)>,
     mut entered: MessageWriter<TriggerEntered>,
+    mut exited: MessageWriter<TriggerExited>,
 ) {
     let frame_count = clock.stepper.frame().frame_count;
     clock.steps.clear();
@@ -238,6 +358,9 @@ pub fn run_fixed_steps(
             let report = avatar.fixed_update(&controls.0, &collision.world, &collision.rules, delta, frame_count);
             for &collider in &report.entered_triggers {
                 entered.write(TriggerEntered { avatar: entity, collider });
+            }
+            for &collider in &report.exited_triggers {
+                exited.write(TriggerExited { avatar: entity, collider });
             }
         }
         clock.stepper.synchronize_fixed_delta();

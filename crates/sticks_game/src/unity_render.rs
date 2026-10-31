@@ -235,7 +235,20 @@ pub struct LevelScenery {
     static_entries: Vec<(u32, SimVec3, f32)>,
     /// Surfaces that cast a "Polygon Shadow".
     shadowed_surfaces: Vec<Surface>,
+    /// Renderers the camera moves (`FakeParallax` above a surface or a built-in mesh): texture,
+    /// the mesh where the scene put it, and the parallax.
+    parallax_meshes: Vec<(u32, Geometry, unity_data::sprites::Parallax)>,
 }
+
+/// Level sprites (indices into `Level::sprites`) whose objects are gone or switched off (a prop
+/// that exploded): neither they nor their shadow copies are drawn.
+#[derive(Resource, Default)]
+pub struct HiddenSprites(pub std::collections::HashSet<usize>);
+
+/// Where the game moves bodies that level sprites ride on this frame (`Motion::follow` offsets;
+/// the `HorizontalScroller2D` clouds).
+#[derive(Resource, Default)]
+pub struct SpriteFollowOffsets(pub Vec<[f32; 2]>);
 
 /// The scene light this frame.
 #[derive(Resource, Default)]
@@ -327,7 +340,15 @@ fn build_scenery(
     }
     // Helicopters draw their own sprites (they move with the body).
     let helicopter_roots: Vec<_> = level.0.helicopters.iter().map(|h| h.root).collect();
-    let art = LevelArt::build(&level.0.sprites, |s| s.rigid_root.is_some_and(|r| helicopter_roots.contains(&r)), |guid| libraries.get(guid), |path| textures.id(path, &mut load));
+    // `HorizontalScroller2D` bodies carry their sprites (`crate::scenery`).
+    let follow = |s: &unity_data::sprites::SceneSprite| s.rigid_root.and_then(|r| level.0.scrollers.iter().position(|sc| sc.object == r));
+    let art = LevelArt::build_following(
+        &level.0.sprites,
+        |s| s.rigid_root.is_some_and(|r| helicopter_roots.contains(&r)),
+        follow,
+        |guid| libraries.get(guid),
+        |path| textures.id(path, &mut load),
+    );
 
     let mut statics = Vec::new();
     let mut entries = Vec::new();
@@ -338,6 +359,7 @@ fn build_scenery(
     // TODO(UNCERTAIN): the surfaces' faded border ring and per-vertex colours are not built.
     let library = MaterialLibrary::scan(&assets_dir);
     let mut shadowed_surfaces = Vec::new();
+    let mut parallax_meshes = Vec::new();
     let mut surfaces = 0usize;
     for collider in &level.0.colliders {
         let (Some(surface), Shape::Polygon(_)) = (&collider.surface, &collider.shape) else { continue };
@@ -347,12 +369,38 @@ fn build_scenery(
         if geometry.is_empty() {
             continue;
         }
+        // `FakeParallax` (Japan's mountains) moves the drawn mesh with the camera.
+        // TODO(UNCERTAIN): a parallax surface's "Polygon Shadow" (none recovered so far).
+        if let Some(parallax) = surface.parallax {
+            parallax_meshes.push((texture, geometry, parallax));
+            surfaces += 1;
+            continue;
+        }
         entries.push((texture, geometry.bounds_center(), extent(&geometry)));
         statics.push(geometry);
         if surface.shadow_plane_z.is_some() {
             shadowed_surfaces.push(surface.clone());
         }
         surfaces += 1;
+    }
+    // Built-in mesh renderers (Japan's sky plane): "Color Polygon" / "Textured Polygon".
+    for mesh in &level.0.meshes {
+        let recovered = library.load(&mesh.material);
+        let texture = match recovered.as_ref().and_then(|m| m.main_texture.as_ref()) {
+            Some(path) => textures.id(path, &mut load),
+            None => textures.color(recovered.as_ref().map_or([1.0; 4], |m| m.color), &mut load),
+        };
+        let mut geometry = sticks_sim::draw::builtin_mesh_geometry(mesh.mesh, &mesh.world);
+        if let Some(m) = &recovered {
+            sticks_sim::draw::apply_texture_transform(&mut geometry, m.tiling, m.offset);
+        }
+        match mesh.parallax {
+            Some(parallax) => parallax_meshes.push((texture, geometry, parallax)),
+            None => {
+                entries.push((texture, geometry.bounds_center(), extent(&geometry)));
+                statics.push(geometry);
+            }
+        }
     }
     let white = textures.polygon_shadow(&mut load);
     info!(
@@ -371,7 +419,9 @@ fn build_scenery(
     commands.insert_resource(SceneLight::new(&setup));
     commands.insert_resource(setup);
     commands.insert_resource(ShadowTexture(white));
-    commands.insert_resource(LevelScenery { art, statics, static_entries: entries, shadowed_surfaces });
+    commands.insert_resource(HiddenSprites::default());
+    commands.insert_resource(SpriteFollowOffsets::default());
+    commands.insert_resource(LevelScenery { art, statics, static_entries: entries, shadowed_surfaces, parallax_meshes });
 }
 
 /// The material polygon shadows are drawn with ("Polygon Shadow").
@@ -394,7 +444,7 @@ pub fn extent(g: &Geometry) -> f32 {
 fn forget_scene(mut commands: Commands, mut pool: ResMut<RunPool>, mut queue: ResMut<FrameQueue>, runs: Query<Entity, With<QueueRun>>) {
     commands.remove_resource::<LevelScenery>();
     for entity in &runs {
-        commands.entity(entity).despawn();
+        commands.entity(entity).try_despawn();
     }
     pool.0.clear();
     queue.0.clear();
@@ -445,6 +495,8 @@ pub fn camera_view(rig: &Rig, windows: &Query<&Window, With<PrimaryWindow>>) -> 
 fn draw_queue(
     mut commands: Commands,
     scenery: Option<Res<LevelScenery>>,
+    hidden: Option<Res<HiddenSprites>>,
+    follow: Option<Res<SpriteFollowOffsets>>,
     shadow_texture: Option<Res<ShadowTexture>>,
     light: Res<SceneLight>,
     textures: Res<UnityTextures>,
@@ -464,22 +516,42 @@ fn draw_queue(
     let queue = &mut queue.0;
     let empty: Vec<Geometry> = Vec::new();
     let statics = scenery.as_ref().map_or(&empty, |s| &s.statics);
+    let no_offsets: Vec<[f32; 2]> = Vec::new();
+    let offsets = follow.as_ref().map_or(&no_offsets, |f| &f.0);
+    let is_hidden = |source: Option<&usize>| source.is_some_and(|s| hidden.as_ref().is_some_and(|h| h.0.contains(s)));
     if let Some(scenery) = &scenery {
         for (index, &(texture, center, extent)) in scenery.static_entries.iter().enumerate() {
+            // Entries below the sprite count are sprites (`sprite_sources` index-matched).
+            if index < scenery.art.sprites.len() && is_hidden(scenery.art.sprite_sources.get(index)) {
+                continue;
+            }
             if view.may_see(center, extent) {
                 queue.push_static(texture, center, index);
             }
         }
-        // Sprites the camera moves (`FakeParallax`, `ScaleSpriteWithCameraDistance`).
-        for sprite in &scenery.art.moving {
-            let geometry = sprite.geometry(camera);
+        // Sprites the camera moves (`FakeParallax`, `ScaleSpriteWithCameraDistance`) or that ride
+        // on a moved body (`HorizontalScroller2D`).
+        for (k, sprite) in scenery.art.moving.iter().enumerate() {
+            if is_hidden(scenery.art.moving_sources.get(k)) {
+                continue;
+            }
+            let geometry = sprite.geometry_with(camera, offsets);
             if !geometry.is_empty() && view.may_see(geometry.bounds_center(), extent(&geometry)) {
                 queue.push_frame(sprite.texture, geometry);
             }
         }
+        for (texture, geometry, parallax) in &scenery.parallax_meshes {
+            let moved = sticks_sim::draw::translated(geometry, sticks_sim::draw::parallax_delta(parallax, camera));
+            if view.may_see(moved.bounds_center(), extent(&moved)) {
+                queue.push_frame(*texture, moved);
+            }
+        }
         if let Some(light) = light.for_shadows {
-            for shadow in &scenery.art.shadows {
-                let geometry = shadow.geometry(light, camera);
+            for (k, shadow) in scenery.art.shadows.iter().enumerate() {
+                if is_hidden(scenery.art.shadow_sources.get(k)) {
+                    continue;
+                }
+                let geometry = shadow.geometry_with(light, camera, offsets);
                 if view.may_see(geometry.bounds_center(), extent(&geometry)) {
                     queue.push_frame(shadow.texture, geometry);
                 }

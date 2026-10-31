@@ -13,6 +13,8 @@ pub fn physics_rules(settings: &Physics2dSettings) -> PhysicsRules {
         layer_matrix: settings.layer_collision_matrix,
         raycasts_hit_triggers: settings.raycasts_hit_triggers,
         box2d: settings.box2d,
+        velocity_iterations: settings.velocity_iterations,
+        position_iterations: settings.position_iterations,
     }
 }
 
@@ -61,7 +63,23 @@ pub struct LevelBundle {
 /// Load a level plus the global data it is played with (`level_asset` is relative to the export
 /// root, e.g. `Assets/Game/Levels/Platforms/Platforms.unity`).
 pub fn load_level_bundle(export_root: &std::path::Path, level_asset: &str) -> std::io::Result<LevelBundle> {
-    let level = unity_data::level::load_level(export_root, level_asset)?;
+    load_level_bundle_for(export_root, level_asset, None)
+}
+
+/// [`load_level_bundle`] with the `Awake` gates of the level applied for this game
+/// (`unity_data::level::apply_awake_gates`).
+pub fn load_level_bundle_for(export_root: &std::path::Path, level_asset: &str, conditions: Option<unity_data::level::AwakeConditions>) -> std::io::Result<LevelBundle> {
+    load_level_bundle_with(export_root, level_asset, conditions, unity_data::level::OFFLINE_CONTROL_TYPES)
+}
+
+/// [`load_level_bundle_for`] with the control types in use (`AllClientControlTypes`).
+pub fn load_level_bundle_with(
+    export_root: &std::path::Path,
+    level_asset: &str,
+    conditions: Option<unity_data::level::AwakeConditions>,
+    control_types: &str,
+) -> std::io::Result<LevelBundle> {
+    let level = unity_data::level::load_level_with(export_root, level_asset, conditions, control_types)?;
     let settings_text = std::fs::read_to_string(export_root.join("ProjectSettings/Physics2DSettings.asset"))?;
     let settings = unity_data::settings::parse_physics2d(&settings_text)
         .ok_or_else(|| std::io::Error::other("Physics2DSettings.asset could not be parsed"))?;

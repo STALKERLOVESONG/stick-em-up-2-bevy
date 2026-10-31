@@ -381,3 +381,94 @@ pub fn try_load_projectile(assets_dir: &Path, guid: &str) -> std::io::Result<Opt
 pub fn load_projectile(assets_dir: &Path, guid: &str) -> std::io::Result<ProjectileSpec> {
     try_load_projectile(assets_dir, guid)?.ok_or_else(|| std::io::Error::other(format!("prefab {guid}: not a projectile")))
 }
+
+/// One collider path of a melee effect, in the effect root's local space.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeleePiece {
+    pub path: Vec<[f32; 2]>,
+    /// `DontExplodeOnCollisionWithMe` on its object: projectiles bounce off it instead of
+    /// exploding (the Sword's "Deflector").
+    pub deflector: bool,
+    /// The collider's `PhysicsMaterial2D` bounciness (0 without a material).
+    pub bounciness: f32,
+}
+
+/// A melee effect a `ProjectileLauncher` spawns (the Sword's "Sword Swish"): a kinematic body
+/// that `FollowProjectileLauncher` keeps at the launch point, damaging what it touches
+/// (`DamageOtherOnCollision`) until `SpawnExpiration` despawns it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MeleeSpec {
+    pub name: String,
+    pub guid: String,
+    /// `DamageOtherOnCollision.damage`.
+    pub damage: f32,
+    /// `DamageOtherOnCollisionDifficultyModifier` (none on the Sword Swish).
+    pub damage_scaling: Option<DifficultyScaling>,
+    /// `SpawnExpiration.time`.
+    pub lifetime: f32,
+    /// `TakeResponsibilityForCollidingDamagers`: what bounces off it becomes the swinger's.
+    pub takes_responsibility: bool,
+    pub pieces: Vec<MeleePiece>,
+}
+
+/// `PhysicsMaterial2D.bounciness` of the material with this GUID.
+fn bounciness_of(assets_dir: &Path, guid: &str) -> Option<f32> {
+    let materials = GuidIndex::scan(&assets_dir.join("PhysicsMaterial2D"), "physicsMaterial2D");
+    let text = std::fs::read_to_string(materials.path(guid)?).ok()?;
+    text.lines().find_map(|l| l.trim().strip_prefix("bounciness:").and_then(|v| v.trim().parse().ok()))
+}
+
+/// Parse a melee effect prefab (`None` when it is not one).
+pub fn parse_melee(scene: &Scene, scripts: &ScriptIndex, assets_dir: &Path) -> Option<MeleeSpec> {
+    let class_of = |doc: &crate::yaml::Document| doc.body.get("m_Script").and_then(Value::guid).and_then(|g| scripts.class_name(g));
+    let objects = scene.game_objects();
+    let root = objects.iter().find(|go| go.parent().is_none())?;
+    let field = |class: &str| root.components().into_iter().find(|c| class_of(c) == Some(class)).map(|c| &c.body);
+    field("FollowProjectileLauncher")?;
+    let damage = field("DamageOtherOnCollision")?.f32_of("damage").unwrap_or(10.0);
+    let mut spec = MeleeSpec {
+        name: root.name().to_owned(),
+        guid: String::new(),
+        damage,
+        damage_scaling: field("DamageOtherOnCollisionDifficultyModifier").map(crate::level::scaling_of),
+        lifetime: field("SpawnExpiration").and_then(|b| b.f32_of("time")).unwrap_or(8.0),
+        takes_responsibility: field("TakeResponsibilityForCollidingDamagers").is_some(),
+        pieces: Vec::new(),
+    };
+    for go in &objects {
+        let Some(polygon) = go.component(class::POLYGON_COLLIDER_2D) else { continue };
+        if !polygon.body.bool_of("m_Enabled").unwrap_or(true) {
+            continue;
+        }
+        let (position, rotation) = relative_to_root(*go, *root);
+        let q = unity_compat::Quat::from_array(rotation);
+        let offset = polygon.body.get("m_Offset").and_then(Value::as_vec2).unwrap_or((0.0, 0.0));
+        let deflector = go.components().iter().any(|c| class_of(c) == Some("DontExplodeOnCollisionWithMe"));
+        let bounciness = polygon.body.get("m_Material").and_then(Value::guid).and_then(|g| bounciness_of(assets_dir, g)).unwrap_or(0.0);
+        for path in polygon.body.get("m_Points").and_then(|p| p.get("m_Paths")).map(Value::as_seq).unwrap_or(&[]) {
+            let points = path
+                .as_seq()
+                .iter()
+                .filter_map(Value::as_vec2)
+                .map(|(x, y)| {
+                    let p = q * unity_compat::Vec3::new(x + offset.0, y + offset.1, 0.0);
+                    [p.x + position[0], p.y + position[1]]
+                })
+                .collect();
+            spec.pieces.push(MeleePiece { path: points, deflector, bounciness });
+        }
+    }
+    Some(spec)
+}
+
+/// Find a launcher's prefab by GUID and parse it as a melee effect.
+pub fn try_load_melee(assets_dir: &Path, guid: &str) -> std::io::Result<Option<MeleeSpec>> {
+    let prefabs = GuidIndex::scan(&assets_dir.join("GameObject"), "prefab");
+    let path = prefabs.path(guid).ok_or_else(|| std::io::Error::other(format!("no prefab with guid {guid}")))?;
+    let scripts = ScriptIndex::scan(&assets_dir.join("Scripts"));
+    let scene = Scene::load(path)?;
+    Ok(parse_melee(&scene, &scripts, assets_dir).map(|mut spec| {
+        spec.guid = guid.to_owned();
+        spec
+    }))
+}
