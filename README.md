@@ -39,13 +39,15 @@ The original game was built in Unity 5. This project studies how it *behaves*: i
 | Player physics | 🟢 mostly done |
 | Weapons, projectiles & sticking | 🟢 mostly done |
 | Particles & FX | 🟢 mostly done |
-| Audio | 🟡 implemented, playback being verified |
+| Audio | 🟢 mostly done |
 | Vehicles | 🟡 helicopters done; cars, rockets, cannons to do |
-| UI & lobby | 🟡 main flow done; customisation screens to do |
+| UI & lobby | 🟢 mostly done |
 | Networking & game loop | 🟡 offline loop done; LAN and peer-to-peer internet rooms implemented, being tested |
 | Launcher | 🟡 cheats, settings and name done; gun maker and level editor planned |
 
-The detailed per-feature audit, including every behaviour still marked uncertain, is in [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md).
+![How much of the original game's code is ported](docs/coverage.svg)
+
+One square per method of the decompiled game, sized by its code and grouped by system (regenerate with `python tools/coverage.py --source ../source/Assembly-CSharp --assets ../assets_exported/ExportedProject/Assets --crates crates --out docs --progress ../progress.html`; it matches names, so it is an estimate). The detailed per-feature audit, including every behaviour still marked uncertain, is in [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md).
 
 ## Architecture
 
@@ -124,7 +126,7 @@ cargo run --release -p sticks_game -- /path/to/ExportedProject "Assets/Game/Leve
 cargo run --release -p sticks_launcher
 ```
 
-A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), pick the volume, fullscreen and vertical sync, and set the name other players see. **Play** starts `sticks_game` from the same folder with those choices. Settings live only here; the game has no settings screen. The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
+A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), pick the volume, fullscreen and vertical sync, and set the name other players see. **Play** starts `sticks_game` from the same folder with those choices. Settings live only here; the game has no settings screen. **Original Game Only** starts the game without any of the additions (cheats, internet play, rooms, the working Send Link). The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
 
 ### Playing with friends
 

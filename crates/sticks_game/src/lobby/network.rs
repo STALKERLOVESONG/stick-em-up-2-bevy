@@ -270,7 +270,7 @@ fn watch_invitations(lobby: &mut Lobby, net: &mut Net, dt: f32) {
 fn connection_screen(lobby: &mut Lobby, net: &mut Net, dt: f32) {
     let Some(s) = lobby.named_script("NetworkSetup").cloned() else { return };
     let listing_screen_up = lobby.active_in_hierarchy(s.object) || lobby.named_script("ServerList").is_some_and(|l| lobby.active_in_hierarchy(l.object));
-    if listing_screen_up && net.is_offline() {
+    if listing_screen_up && net.is_offline() && !crate::settings::original_only() {
         watch_invitations(lobby, net, dt);
     } else {
         // Read again as soon as a listing screen comes up.
@@ -299,7 +299,7 @@ fn connection_screen(lobby: &mut Lobby, net: &mut Net, dt: f32) {
     if let Some(join) = join {
         lobby.active[join] = servers.len() == 1;
         if let Some(listing) = servers.first().filter(|_| servers.len() == 1) {
-            lobby.set_button_text(join, &format!("Join Game: {}", listing.room().label()));
+            lobby.set_button_text(join, &format!("Join Game: {}", listing_label(listing)));
         }
     }
     if let Some(show) = show {
@@ -335,7 +335,7 @@ fn server_list(lobby: &mut Lobby, net: &mut Net) {
         let listing = servers.get(first + i);
         lobby.active[button] = listing.is_some();
         if let Some(listing) = listing {
-            lobby.set_button_text(button, &listing.room().label());
+            lobby.set_button_text(button, &listing_label(listing));
         }
     }
     let page = lobby.network.page;
@@ -370,6 +370,11 @@ fn send_link_prompt(lobby: &mut Lobby, net: &Net, dt: f32) {
         lobby.active[o] = !offline;
     }
     let Some(button) = lobby.scene.field_object(&s, "sendLinkButton") else { return };
+    if crate::settings::original_only() {
+        // The original hides it on desktop (it linked to the phones' Starter Edition).
+        lobby.active[button] = false;
+        return;
+    }
     lobby.active[button] = true;
     let text = match &mut lobby.network.link_feedback {
         Some((text, left)) => {
@@ -474,7 +479,13 @@ pub(super) fn press(lobby: &mut Lobby, net: &mut Net, object: usize) -> bool {
     if let Some(s) = lobby.named_script("NetworkSetup").cloned() {
         let field = |lobby: &Lobby, name: &str| lobby.scene.field_object(&s, name);
         if field(lobby, "startNetworkGameButton") == Some(object) {
-            lobby.network.dialog = Some(Dialog::CreateRoom { next: field(lobby, "nextScreen"), failed_label: field(lobby, "connectToWiFiLabel") });
+            let (next, failed_label) = (field(lobby, "nextScreen"), field(lobby, "connectToWiFiLabel"));
+            if crate::settings::original_only() {
+                // `NetworkSetup.StartNetworkGame`: host at once.
+                create_room(lobby, net, sticks_net::RoomConfig::new(&crate::net::machine_name(), "", sticks_net::room::MAX_MACHINES), next, failed_label);
+            } else {
+                lobby.network.dialog = Some(Dialog::CreateRoom { next, failed_label });
+            }
             return true;
         }
         if field(lobby, "joinNetworkGameButton") == Some(object) {
@@ -567,6 +578,11 @@ pub(super) fn create_room(lobby: &mut Lobby, net: &mut Net, config: sticks_net::
             }
         }
     }
+}
+
+/// What a join button shows: the room's name, size and lock (the original: the host's name).
+fn listing_label(listing: &ServerListing) -> String {
+    if crate::settings::original_only() { listing.name() } else { listing.room().label() }
 }
 
 /// `ServerList.ConnectToServerOrShowVersionError`; a locked room asks for its password first.

@@ -11,6 +11,13 @@ pub use sticks_sim::options::{Cheats, LaunchOptions, Settings};
 
 use crate::lobby::LobbyMemory;
 
+/// Whether this run is the original game only (the launcher's "Original Game Only"): no
+/// cheats, no internet play, no rooms, no working Send Link.
+pub fn original_only() -> bool {
+    static ORIGINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ORIGINAL.get_or_init(|| LaunchOptions::from_environment().original_only)
+}
+
 /// The options this run was launched with (`sticks_sim::options::LAUNCH_OPTIONS_VARIABLE`).
 #[derive(Resource, Clone, Debug, Default)]
 pub struct Launch(pub LaunchOptions);
@@ -19,7 +26,7 @@ pub struct SettingsPlugin;
 
 impl Plugin for SettingsPlugin {
     fn build(&self, app: &mut App) {
-        let launch = LaunchOptions::from_environment();
+        let launch = LaunchOptions::from_environment().effective();
         if launch != LaunchOptions::default() {
             info!("launched with {}", launch.to_environment());
         }

@@ -1,0 +1,3883 @@
+{
+ "date": "2026-10-31",
+ "percent_ported": 65.5,
+ "methods": {
+  "checked": 174,
+  "ported": 417,
+  "to port": 436,
+  "nothing to port": 48,
+  "unused": 98
+ },
+ "lines": {
+  "checked": 3078,
+  "ported": 6591,
+  "to port": 5090,
+  "nothing to port": 616,
+  "unused": 858
+ },
+ "systems": {
+  "HUD": {
+   "checked": 0,
+   "ported": 117,
+   "to port": 49,
+   "nothing to port": 23,
+   "unused": 20
+  },
+  "audio": {
+   "checked": 0,
+   "ported": 18,
+   "to port": 4,
+   "nothing to port": 12,
+   "unused": 7
+  },
+  "camera": {
+   "checked": 0,
+   "ported": 11,
+   "to port": 25,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "characters": {
+   "checked": 730,
+   "ported": 37,
+   "to port": 288,
+   "nothing to port": 18,
+   "unused": 0
+  },
+  "core & helpers": {
+   "checked": 0,
+   "ported": 55,
+   "to port": 177,
+   "nothing to port": 181,
+   "unused": 29
+  },
+  "enemies & AI": {
+   "checked": 39,
+   "ported": 225,
+   "to port": 110,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "input": {
+   "checked": 120,
+   "ported": 311,
+   "to port": 486,
+   "nothing to port": 55,
+   "unused": 46
+  },
+  "level flow & goals": {
+   "checked": 491,
+   "ported": 1925,
+   "to port": 990,
+   "nothing to port": 0,
+   "unused": 46
+  },
+  "lobby & menus": {
+   "checked": 607,
+   "ported": 1114,
+   "to port": 422,
+   "nothing to port": 223,
+   "unused": 195
+  },
+  "network": {
+   "checked": 102,
+   "ported": 848,
+   "to port": 635,
+   "nothing to port": 104,
+   "unused": 180
+  },
+  "rendering & effects": {
+   "checked": 139,
+   "ported": 1221,
+   "to port": 1208,
+   "nothing to port": 0,
+   "unused": 59
+  },
+  "vehicles": {
+   "checked": 246,
+   "ported": 358,
+   "to port": 422,
+   "nothing to port": 0,
+   "unused": 23
+  },
+  "weapons & damage": {
+   "checked": 604,
+   "ported": 351,
+   "to port": 274,
+   "nothing to port": 0,
+   "unused": 253
+  }
+ },
+ "levels": {
+  "Complete": {
+   "scripts": 66,
+   "percent": 65.4,
+   "gaps": [
+    [
+     "tk2dTextMesh",
+     363
+    ],
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "AllClientControlTypes",
+     86
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "NextGoalPrompt",
+     49
+    ],
+    [
+     "TextShadowPositioner",
+     47
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "CannonControl",
+     25
+    ]
+   ]
+  },
+  "Corruption 2": {
+   "scripts": 98,
+   "percent": 73.4,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "CarGunnerControl",
+     64
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarControl",
+     43
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "Seeker",
+     38
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "ConstantExplosion",
+     29
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ]
+   ]
+  },
+  "Japan VS": {
+   "scripts": 66,
+   "percent": 72.9,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "VersusGameEnder",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ],
+    [
+     "LinesToChildren",
+     21
+    ],
+    [
+     "SendExplodeToClients",
+     19
+    ]
+   ]
+  },
+  "Japan": {
+   "scripts": 88,
+   "percent": 74.7,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "LevelTips",
+     36
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ],
+    [
+     "LinesToChildren",
+     21
+    ]
+   ]
+  },
+  "Moon Race": {
+   "scripts": 84,
+   "percent": 68.0,
+   "gaps": [
+    [
+     "tk2dTextMesh",
+     363
+    ],
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "CarGunnerControl",
+     64
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarControl",
+     43
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "LevelTips",
+     36
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "TimeLimit",
+     34
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ]
+   ]
+  },
+  "Moon": {
+   "scripts": 85,
+   "percent": 70.8,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "CarGunnerControl",
+     64
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "StarShower",
+     55
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarControl",
+     43
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "LevelTips",
+     36
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "Dock",
+     31
+    ],
+    [
+     "CharacterInput",
+     28
+    ]
+   ]
+  },
+  "Office": {
+   "scripts": 88,
+   "percent": 67.8,
+   "gaps": [
+    [
+     "tk2dTextMesh",
+     363
+    ],
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "AllClientControlTypes",
+     86
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "DestroyAllForGoal",
+     28
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ]
+   ]
+  },
+  "Pirates": {
+   "scripts": 87,
+   "percent": 73.0,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "Whale",
+     37
+    ],
+    [
+     "LevelTips",
+     36
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "CannonControl",
+     25
+    ],
+    [
+     "DotsRenderer",
+     24
+    ]
+   ]
+  },
+  "Platforms": {
+   "scripts": 62,
+   "percent": 73.1,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "VersusGameEnder",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ],
+    [
+     "LinesToChildren",
+     21
+    ],
+    [
+     "SetProjectileSpeedByCharge",
+     12
+    ]
+   ]
+  },
+  "Skyline 2": {
+   "scripts": 95,
+   "percent": 73.5,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "AllClientControlTypes",
+     86
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ],
+    [
+     "LinesToChildren",
+     21
+    ]
+   ]
+  },
+  "Skyline VS": {
+   "scripts": 62,
+   "percent": 73.1,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "VersusGameEnder",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ],
+    [
+     "LinesToChildren",
+     21
+    ],
+    [
+     "SetProjectileSpeedByCharge",
+     12
+    ]
+   ]
+  },
+  "Skyline": {
+   "scripts": 98,
+   "percent": 69.6,
+   "gaps": [
+    [
+     "tk2dTextMesh",
+     363
+    ],
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "AllClientControlTypes",
+     86
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TextShadowPositioner",
+     47
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ]
+   ]
+  },
+  "Treetops VS": {
+   "scripts": 64,
+   "percent": 72.0,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "VersusGameEnder",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "LocallyDeactivateOffscreen",
+     32
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DetachChildWhenDisabled",
+     25
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ]
+   ]
+  },
+  "Treetops": {
+   "scripts": 80,
+   "percent": 73.3,
+   "gaps": [
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "Player",
+     81
+    ],
+    [
+     "ZeroShotPerfectHealthGoals",
+     81
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "CarInput",
+     42
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "LevelTips",
+     36
+    ],
+    [
+     "TriggeredByAllPlayers",
+     36
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "LocallyDeactivateOffscreen",
+     32
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DetachChildWhenDisabled",
+     25
+    ],
+    [
+     "DotsRenderer",
+     24
+    ]
+   ]
+  },
+  "Lobby": {
+   "scripts": 89,
+   "percent": 76.4,
+   "gaps": [
+    [
+     "tk2dTextMesh",
+     363
+    ],
+    [
+     "ControlAssignment",
+     187
+    ],
+    [
+     "ControlSlot",
+     179
+    ],
+    [
+     "CharacterControl2D",
+     69
+    ],
+    [
+     "Respawner",
+     63
+    ],
+    [
+     "AimVisualizer",
+     61
+    ],
+    [
+     "CustomizeColor",
+     51
+    ],
+    [
+     "SynchronizeRigidBody2D",
+     51
+    ],
+    [
+     "TextShadowPositioner",
+     47
+    ],
+    [
+     "TellOwnerToTellAllClientsToExplode",
+     46
+    ],
+    [
+     "FourFragShotGoals",
+     45
+    ],
+    [
+     "LinesRendererManager",
+     38
+    ],
+    [
+     "FlatSprite",
+     37
+    ],
+    [
+     "RespawnerInstantiator",
+     33
+    ],
+    [
+     "CharacterInput",
+     28
+    ],
+    [
+     "DamageOtherOnCollision",
+     26
+    ],
+    [
+     "DotsRenderer",
+     24
+    ],
+    [
+     "LinesRenderer",
+     22
+    ],
+    [
+     "LinesToChildren",
+     21
+    ],
+    [
+     "ReportIfColorsCustomized",
+     20
+    ]
+   ]
+  },
+  "Permanent System": {
+   "scripts": 38,
+   "percent": 55.8,
+   "gaps": [
+    [
+     "tk2dTextMesh",
+     363
+    ],
+    [
+     "tk2dSlicedSprite",
+     240
+    ],
+    [
+     "GoalProgressUI",
+     108
+    ],
+    [
+     "HighScores",
+     90
+    ],
+    [
+     "ScoreCalculator",
+     75
+    ],
+    [
+     "Slider",
+     62
+    ],
+    [
+     "Goals",
+     49
+    ],
+    [
+     "ControlPrompt",
+     47
+    ],
+    [
+     "WeaponIndicatorUI",
+     44
+    ],
+    [
+     "LevelLoader",
+     39
+    ],
+    [
+     "InGameMenuHandler",
+     24
+    ],
+    [
+     "LayoutControls",
+     23
+    ],
+    [
+     "FadeInUI",
+     21
+    ],
+    [
+     "DataManager",
+     20
+    ],
+    [
+     "TeamVersusScoreUI",
+     18
+    ],
+    [
+     "Button",
+     15
+    ],
+    [
+     "LevelTimer",
+     12
+    ],
+    [
+     "VersusScoreTable",
+     10
+    ],
+    [
+     "Pointer",
+     10
+    ],
+    [
+     "KeyboardAndMouseMenuInput",
+     10
+    ]
+   ]
+  }
+ },
+ "classes": {
+  "ActivateExclusively": {
+   "lines": 15,
+   "ported": 0,
+   "checked": 15,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ActivateOrDestroyAccordingToDifficultyLevel": {
+   "lines": 17,
+   "ported": 17,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ActivateSomethingOnButtonPress": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ActivateSomethingOnTriggered": {
+   "lines": 26,
+   "ported": 0,
+   "checked": 26,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "AimVisualizer": {
+   "lines": 61,
+   "ported": 0,
+   "checked": 0,
+   "to port": 61,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "AllClientControlTypes": {
+   "lines": 109,
+   "ported": 23,
+   "checked": 0,
+   "to port": 86,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "AllLevelGoalProgress": {
+   "lines": 39,
+   "ported": 13,
+   "checked": 0,
+   "to port": 26,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "AllLevelUnlockCheat": {
+   "lines": 12,
+   "ported": 12,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "AllowToStartAndThenDeactivate": {
+   "lines": 16,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 16
+  },
+  "AllowedWeapons": {
+   "lines": 22,
+   "ported": 0,
+   "checked": 22,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "AudioUpdater": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 7
+  },
+  "BackButton": {
+   "lines": 11,
+   "ported": 11,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "BigScreenOrthographicCameraScaler": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 12,
+   "unused": 0
+  },
+  "Button": {
+   "lines": 197,
+   "ported": 0,
+   "checked": 182,
+   "to port": 15,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CameraPositionInfluencer": {
+   "lines": 11,
+   "ported": 11,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CannonColor": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 0,
+   "to port": 12,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CannonControl": {
+   "lines": 44,
+   "ported": 19,
+   "checked": 0,
+   "to port": 25,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CarControl": {
+   "lines": 187,
+   "ported": 144,
+   "checked": 0,
+   "to port": 43,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CarGunnerControl": {
+   "lines": 64,
+   "ported": 0,
+   "checked": 0,
+   "to port": 64,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CarInput": {
+   "lines": 42,
+   "ported": 0,
+   "checked": 0,
+   "to port": 42,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Changer": {
+   "lines": 87,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 87
+  },
+  "CharacterColor": {
+   "lines": 31,
+   "ported": 31,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CharacterColorSetter": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CharacterColors": {
+   "lines": 81,
+   "ported": 0,
+   "checked": 31,
+   "to port": 50,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CharacterControl2D": {
+   "lines": 617,
+   "ported": 0,
+   "checked": 548,
+   "to port": 69,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CharacterInput": {
+   "lines": 97,
+   "ported": 0,
+   "checked": 69,
+   "to port": 28,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Chargeable": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 7
+  },
+  "ClientDisconnection": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ColorModels": {
+   "lines": 89,
+   "ported": 89,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ConnectionLimitSetter": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ConstantExplosion": {
+   "lines": 29,
+   "ported": 0,
+   "checked": 0,
+   "to port": 29,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ControlAssignment": {
+   "lines": 553,
+   "ported": 0,
+   "checked": 366,
+   "to port": 187,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ControlPrompt": {
+   "lines": 47,
+   "ported": 0,
+   "checked": 0,
+   "to port": 47,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ControlSlot": {
+   "lines": 341,
+   "ported": 0,
+   "checked": 162,
+   "to port": 179,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CopyBoxColliderFromChild": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CopyTransform": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 7
+  },
+  "CurrentCollectionSprite": {
+   "lines": 12,
+   "ported": 12,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "CustomizeColor": {
+   "lines": 422,
+   "ported": 371,
+   "checked": 0,
+   "to port": 51,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DamageOtherOnCollision": {
+   "lines": 70,
+   "ported": 44,
+   "checked": 0,
+   "to port": 26,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DamageOtherOnTriggerEnter": {
+   "lines": 28,
+   "ported": 0,
+   "checked": 28,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DataManager": {
+   "lines": 84,
+   "ported": 64,
+   "checked": 0,
+   "to port": 20,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DespawnOnExplode": {
+   "lines": 15,
+   "ported": 15,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DespawnOnExplosionFinished": {
+   "lines": 10,
+   "ported": 10,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DespawnOnParticleSystemDeath": {
+   "lines": 11,
+   "ported": 11,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DespawnOnSpawnExpiration": {
+   "lines": 10,
+   "ported": 10,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DestroyAllEnemiesLevelEnder": {
+   "lines": 44,
+   "ported": 32,
+   "checked": 0,
+   "to port": 12,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DestroyAllForGoal": {
+   "lines": 28,
+   "ported": 0,
+   "checked": 0,
+   "to port": 28,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DestroyOnExplosion": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 7
+  },
+  "DestroyOnExplosionFinished": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DestroyParticularEnemyLevelEnder": {
+   "lines": 24,
+   "ported": 24,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DestroyRootOnRootExplosionFinished": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DestroyRootOnRootHealthExhausted": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 7
+  },
+  "DestroyWhenNoLongerUsed": {
+   "lines": 17,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 17
+  },
+  "DetachChildWhenDisabled": {
+   "lines": 25,
+   "ported": 0,
+   "checked": 0,
+   "to port": 25,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Diffusion": {
+   "lines": 153,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 153
+  },
+  "DisableCollisionsExceptOnServer": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 7,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DisableGameOvering": {
+   "lines": 5,
+   "ported": 5,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Dock": {
+   "lines": 31,
+   "ported": 0,
+   "checked": 0,
+   "to port": 31,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "DotsRenderer": {
+   "lines": 215,
+   "ported": 191,
+   "checked": 0,
+   "to port": 24,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Draggable": {
+   "lines": 43,
+   "ported": 43,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Duck": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 12,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EjectControllersOnExplode": {
+   "lines": 15,
+   "ported": 15,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Emerge": {
+   "lines": 72,
+   "ported": 64,
+   "checked": 0,
+   "to port": 8,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EnableBehaviourWhenOffline": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EndOfLevelCameraMover": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EndOfLevelEnemyDestroyer": {
+   "lines": 28,
+   "ported": 24,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EndOfLevelTimeSlower": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EndOfLevelUIActivator": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EndOfVersusGameLoserDestroyer": {
+   "lines": 26,
+   "ported": 26,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EndOfVersusGameUIActivator": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EnemyHelicopterInput": {
+   "lines": 17,
+   "ported": 13,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "EnemyRegistrar": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ExitButton": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Explodable": {
+   "lines": 18,
+   "ported": 18,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ExplodableText": {
+   "lines": 106,
+   "ported": 99,
+   "checked": 0,
+   "to port": 7,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ExplodeOnHealthExhausted": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ExplodeOnSpawnExpiration": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ExplodeSomethingOnStart": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ExplodeSpritesAndLines": {
+   "lines": 38,
+   "ported": 0,
+   "checked": 38,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Explosion": {
+   "lines": 346,
+   "ported": 0,
+   "checked": 267,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 79
+  },
+  "FadeInUI": {
+   "lines": 64,
+   "ported": 43,
+   "checked": 0,
+   "to port": 21,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FadeOutUI": {
+   "lines": 21,
+   "ported": 21,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FadeOutUIOnButtonPress": {
+   "lines": 15,
+   "ported": 15,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FireAndMoveIfNecessary": {
+   "lines": 16,
+   "ported": 0,
+   "checked": 16,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FireAtFirstTarget": {
+   "lines": 85,
+   "ported": 81,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FixWorldOffsetFromTransform": {
+   "lines": 12,
+   "ported": 12,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FlatSprite": {
+   "lines": 76,
+   "ported": 0,
+   "checked": 39,
+   "to port": 37,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FollowActivation": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FollowProjectileLauncher": {
+   "lines": 11,
+   "ported": 11,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FollowX": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "FourFragShotGoals": {
+   "lines": 45,
+   "ported": 0,
+   "checked": 0,
+   "to port": 45,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GameInput": {
+   "lines": 20,
+   "ported": 0,
+   "checked": 0,
+   "to port": 20,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GameModeSelect": {
+   "lines": 84,
+   "ported": 84,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GameOverUIActivator": {
+   "lines": 27,
+   "ported": 27,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GameSummary": {
+   "lines": 24,
+   "ported": 24,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Gamepad": {
+   "lines": 8,
+   "ported": 0,
+   "checked": 0,
+   "to port": 8,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GoalCategory": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GoalProgressUI": {
+   "lines": 108,
+   "ported": 0,
+   "checked": 0,
+   "to port": 108,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GoalSpec": {
+   "lines": 16,
+   "ported": 16,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Goals": {
+   "lines": 166,
+   "ported": 0,
+   "checked": 117,
+   "to port": 49,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GoalsDisplay": {
+   "lines": 79,
+   "ported": 79,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "GravityChanger": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Health": {
+   "lines": 49,
+   "ported": 0,
+   "checked": 45,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HealthUI": {
+   "lines": 80,
+   "ported": 72,
+   "checked": 0,
+   "to port": 8,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HelicopterControl": {
+   "lines": 88,
+   "ported": 0,
+   "checked": 84,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HelicopterGunnerControl": {
+   "lines": 54,
+   "ported": 50,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HelicopterGunnerInput": {
+   "lines": 44,
+   "ported": 0,
+   "checked": 0,
+   "to port": 44,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HelicopterInput": {
+   "lines": 52,
+   "ported": 48,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HidePlayerInfo": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HighScores": {
+   "lines": 171,
+   "ported": 0,
+   "checked": 81,
+   "to port": 90,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HighScoresDisplay": {
+   "lines": 76,
+   "ported": 76,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Highlight": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "HorizontalScroller": {
+   "lines": 35,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 35
+  },
+  "HorizontalScroller2D": {
+   "lines": 26,
+   "ported": 26,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "InControlController": {
+   "lines": 30,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 30,
+   "unused": 0
+  },
+  "InGameDisconnectButton": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "InGameMenuHandler": {
+   "lines": 116,
+   "ported": 92,
+   "checked": 0,
+   "to port": 24,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "IsRootControlledTargetQualifier": {
+   "lines": 4,
+   "ported": 0,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "JoystickList": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 9
+  },
+  "Keyboard": {
+   "lines": 4,
+   "ported": 0,
+   "checked": 4,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMouseCarInput": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 11,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMouseCharacterInput": {
+   "lines": 52,
+   "ported": 43,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMouseHelicopterGunnerInput": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 11,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMouseHelicopterInput": {
+   "lines": 12,
+   "ported": 12,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMouseLobbyInput": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 0,
+   "to port": 12,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMouseMenuInput": {
+   "lines": 10,
+   "ported": 0,
+   "checked": 0,
+   "to port": 10,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "KeyboardAndMousePassengerInput": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LayoutControls": {
+   "lines": 23,
+   "ported": 0,
+   "checked": 0,
+   "to port": 23,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelComplete": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelCompleteButton": {
+   "lines": 19,
+   "ported": 19,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelLoader": {
+   "lines": 209,
+   "ported": 170,
+   "checked": 0,
+   "to port": 39,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelLoaderUI": {
+   "lines": 23,
+   "ported": 23,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelNameDisplay": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelSelect": {
+   "lines": 372,
+   "ported": 360,
+   "checked": 0,
+   "to port": 12,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelTimer": {
+   "lines": 26,
+   "ported": 14,
+   "checked": 0,
+   "to port": 12,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LevelTips": {
+   "lines": 170,
+   "ported": 0,
+   "checked": 134,
+   "to port": 36,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LifetimeParticleSystem": {
+   "lines": 28,
+   "ported": 28,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LifetimeSound": {
+   "lines": 22,
+   "ported": 18,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LinesRenderer": {
+   "lines": 272,
+   "ported": 250,
+   "checked": 0,
+   "to port": 22,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LinesRendererManager": {
+   "lines": 38,
+   "ported": 0,
+   "checked": 0,
+   "to port": 38,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LinesToChildren": {
+   "lines": 52,
+   "ported": 0,
+   "checked": 31,
+   "to port": 21,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LinkBehaviourEnablementToControlSlotControlledness": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Lives": {
+   "lines": 16,
+   "ported": 0,
+   "checked": 16,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LobbyClientDisconnection": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LobbyDifficulty": {
+   "lines": 22,
+   "ported": 5,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 17
+  },
+  "LobbyEnder": {
+   "lines": 25,
+   "ported": 25,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LobbyError": {
+   "lines": 20,
+   "ported": 20,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LobbyGameMode": {
+   "lines": 29,
+   "ported": 5,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 24
+  },
+  "LobbyInput": {
+   "lines": 25,
+   "ported": 21,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LobbyInputManager": {
+   "lines": 41,
+   "ported": 33,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 8
+  },
+  "LobbyLevelSelect": {
+   "lines": 60,
+   "ported": 0,
+   "checked": 31,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 29
+  },
+  "LobbyLoader": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 12
+  },
+  "LobbyStartupDirector": {
+   "lines": 25,
+   "ported": 25,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "LobbyTeams": {
+   "lines": 93,
+   "ported": 0,
+   "checked": 28,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 65
+  },
+  "LocalPlayerColorAssignments": {
+   "lines": 44,
+   "ported": 22,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 22
+  },
+  "LocallyDeactivateOffscreen": {
+   "lines": 32,
+   "ported": 0,
+   "checked": 0,
+   "to port": 32,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MaximumDamageCalculator": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MenuInput": {
+   "lines": 17,
+   "ported": 17,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MinimumCameraDistanceChanger": {
+   "lines": 13,
+   "ported": 0,
+   "checked": 0,
+   "to port": 13,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MinimumDifficulty": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 7,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MinimumPlayers": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 7,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Mouse": {
+   "lines": 13,
+   "ported": 0,
+   "checked": 0,
+   "to port": 13,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MouseCursorManager": {
+   "lines": 13,
+   "ported": 9,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 4
+  },
+  "MoveToFirstTarget": {
+   "lines": 23,
+   "ported": 0,
+   "checked": 19,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MoveToOtherControlSlotIfAvailable": {
+   "lines": 15,
+   "ported": 0,
+   "checked": 0,
+   "to port": 15,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "MultipleInstanceRoleInputSpawner": {
+   "lines": 16,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 16
+  },
+  "MuteMusicWhenPlatformMusicIsPlaying": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 12,
+   "unused": 0
+  },
+  "NetworkPool": {
+   "lines": 96,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 96,
+   "unused": 0
+  },
+  "NetworkSetup": {
+   "lines": 106,
+   "ported": 0,
+   "checked": 102,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 4
+  },
+  "NetworkUtility": {
+   "lines": 319,
+   "ported": 4,
+   "checked": 0,
+   "to port": 315,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "NextGoalPrompt": {
+   "lines": 49,
+   "ported": 0,
+   "checked": 0,
+   "to port": 49,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "NoControllers": {
+   "lines": 13,
+   "ported": 13,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "OverallGoalProgressDisplay": {
+   "lines": 24,
+   "ported": 24,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ParticleRotationFollowsVelocity": {
+   "lines": 22,
+   "ported": 22,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ParticleSystemLines": {
+   "lines": 58,
+   "ported": 0,
+   "checked": 58,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PassengerControl": {
+   "lines": 38,
+   "ported": 19,
+   "checked": 0,
+   "to port": 19,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PassengerInput": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 11,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PausableCoroutineRunner": {
+   "lines": 49,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 49,
+   "unused": 0
+  },
+  "Pause": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PlaySoundOnButtonPress": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PlaySoundOnExplode": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Player": {
+   "lines": 229,
+   "ported": 0,
+   "checked": 148,
+   "to port": 81,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PlayerID": {
+   "lines": 114,
+   "ported": 37,
+   "checked": 0,
+   "to port": 77,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PlayerScore": {
+   "lines": 39,
+   "ported": 39,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PlayerSlotAssignments": {
+   "lines": 273,
+   "ported": 160,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 113
+  },
+  "PlayerSpawner": {
+   "lines": 90,
+   "ported": 81,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Pointer": {
+   "lines": 31,
+   "ported": 21,
+   "checked": 0,
+   "to port": 10,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "PolygonColliderOutlineLines": {
+   "lines": 26,
+   "ported": 26,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Pool": {
+   "lines": 43,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 43,
+   "unused": 0
+  },
+  "PreconfiguredController": {
+   "lines": 35,
+   "ported": 0,
+   "checked": 0,
+   "to port": 35,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Prepooler": {
+   "lines": 67,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 67,
+   "unused": 0
+  },
+  "ProcessorPrioritizer": {
+   "lines": 15,
+   "ported": 4,
+   "checked": 0,
+   "to port": 11,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Projectile": {
+   "lines": 56,
+   "ported": 0,
+   "checked": 48,
+   "to port": 8,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ProjectileLauncher": {
+   "lines": 143,
+   "ported": 0,
+   "checked": 143,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ProjectileLauncherModifier": {
+   "lines": 13,
+   "ported": 0,
+   "checked": 13,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RemoteColorAssignments": {
+   "lines": 49,
+   "ported": 36,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 13
+  },
+  "RemoteLevelAvailability": {
+   "lines": 33,
+   "ported": 25,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 8
+  },
+  "RemoveDisconnectedPlayers": {
+   "lines": 5,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 5
+  },
+  "RemoveOwnerAndServerOnlyParts": {
+   "lines": 23,
+   "ported": 23,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RemovePlayerOnlyParts": {
+   "lines": 22,
+   "ported": 0,
+   "checked": 22,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ReportIfColorsCustomized": {
+   "lines": 20,
+   "ported": 0,
+   "checked": 0,
+   "to port": 20,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ResetUnstoppabilityOnDisable": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RespawnAtStartPosition": {
+   "lines": 12,
+   "ported": 6,
+   "checked": 0,
+   "to port": 6,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Respawner": {
+   "lines": 97,
+   "ported": 34,
+   "checked": 0,
+   "to port": 63,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RespawnerInstantiator": {
+   "lines": 69,
+   "ported": 36,
+   "checked": 0,
+   "to port": 33,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RestartLevelButton": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ReturnFromStarterEditionRestrictionsScreenIfUpgraded": {
+   "lines": 8,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 8,
+   "unused": 0
+  },
+  "ReturnToLobbyButton": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Rigidbody2DPathCameraInfluencer": {
+   "lines": 25,
+   "ported": 0,
+   "checked": 0,
+   "to port": 25,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RocketControl": {
+   "lines": 58,
+   "ported": 36,
+   "checked": 0,
+   "to port": 22,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "RoleInput": {
+   "lines": 90,
+   "ported": 87,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 3
+  },
+  "RoleInputProcessor": {
+   "lines": 6,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 6
+  },
+  "RotateToFaceVelocity": {
+   "lines": 9,
+   "ported": 9,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ScaleProportionallyToLocalPositionZ": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ScaleWithAspectRatioToMaintainWidthFraction": {
+   "lines": 18,
+   "ported": 9,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ScaleWithPhysicalScreenHeight": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 11,
+   "unused": 0
+  },
+  "Score": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 9,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ScoreCalculator": {
+   "lines": 263,
+   "ported": 188,
+   "checked": 0,
+   "to port": 75,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ScoreSorter": {
+   "lines": 47,
+   "ported": 43,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ScoreTable": {
+   "lines": 119,
+   "ported": 0,
+   "checked": 31,
+   "to port": 88,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Seeker": {
+   "lines": 59,
+   "ported": 21,
+   "checked": 0,
+   "to port": 38,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SendExplodeToClients": {
+   "lines": 19,
+   "ported": 0,
+   "checked": 0,
+   "to port": 19,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SendStarterEditionLinkPrompt": {
+   "lines": 20,
+   "ported": 20,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ServerBroadcaster": {
+   "lines": 26,
+   "ported": 26,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ServerDiscovery": {
+   "lines": 199,
+   "ported": 101,
+   "checked": 0,
+   "to port": 98,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ServerList": {
+   "lines": 86,
+   "ported": 82,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SetEnemyLayer": {
+   "lines": 4,
+   "ported": 4,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SetEnemyWeapon": {
+   "lines": 4,
+   "ported": 0,
+   "checked": 4,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SetLayerInCampaignMode": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SetLayerOnSpawn": {
+   "lines": 4,
+   "ported": 0,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SetMinimumAllocatableNetworkViewIDs": {
+   "lines": 4,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 4,
+   "unused": 0
+  },
+  "SetNetworkViewGroup": {
+   "lines": 4,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 4,
+   "unused": 0
+  },
+  "SetProjectileSpeedByCharge": {
+   "lines": 12,
+   "ported": 0,
+   "checked": 0,
+   "to port": 12,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ShowAchievements": {
+   "lines": 7,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ShowEndingCheat": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SimplisticButton": {
+   "lines": 7,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 7
+  },
+  "Slider": {
+   "lines": 62,
+   "ported": 0,
+   "checked": 0,
+   "to port": 62,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SocialManager": {
+   "lines": 88,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 88,
+   "unused": 0
+  },
+  "SpawnExpiration": {
+   "lines": 21,
+   "ported": 16,
+   "checked": 0,
+   "to port": 5,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SpawnLocallyOnExplode": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Speedometer": {
+   "lines": 20,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 20
+  },
+  "SplashScreenAdvance": {
+   "lines": 12,
+   "ported": 12,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SpriteFinder": {
+   "lines": 47,
+   "ported": 38,
+   "checked": 0,
+   "to port": 9,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SpriteShadowPositioner": {
+   "lines": 96,
+   "ported": 96,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SpriteShadower": {
+   "lines": 37,
+   "ported": 31,
+   "checked": 0,
+   "to port": 6,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "StandardGoalProgress": {
+   "lines": 25,
+   "ported": 17,
+   "checked": 0,
+   "to port": 8,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "StarShower": {
+   "lines": 55,
+   "ported": 0,
+   "checked": 0,
+   "to port": 55,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SteamManager": {
+   "lines": 68,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 68,
+   "unused": 0
+  },
+  "SteamOverlay": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 11,
+   "unused": 0
+  },
+  "SteamUpgradeHandler": {
+   "lines": 17,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 17,
+   "unused": 0
+  },
+  "SubsumableBehavior": {
+   "lines": 20,
+   "ported": 7,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 13
+  },
+  "SyncServerDamageToClients": {
+   "lines": 27,
+   "ported": 27,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "SynchronizeRigidBody2D": {
+   "lines": 187,
+   "ported": 136,
+   "checked": 0,
+   "to port": 51,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TakeResponsibilityForCollidingDamagers": {
+   "lines": 14,
+   "ported": 14,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TeamArrangement": {
+   "lines": 119,
+   "ported": 119,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TeamVersusScoreTable": {
+   "lines": 25,
+   "ported": 25,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TeamVersusScoreUI": {
+   "lines": 63,
+   "ported": 45,
+   "checked": 0,
+   "to port": 18,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TellOwnerToExplodeOnCollision": {
+   "lines": 32,
+   "ported": 28,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TellOwnerToExplodeOnCollisionUnlessOtherIsDestroyed": {
+   "lines": 50,
+   "ported": 45,
+   "checked": 0,
+   "to port": 5,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TellOwnerToExplodeOnHealthExhausted": {
+   "lines": 8,
+   "ported": 8,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TellOwnerToTellAllClientsToExplode": {
+   "lines": 46,
+   "ported": 0,
+   "checked": 0,
+   "to port": 46,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TestIK": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 9,
+   "unused": 0
+  },
+  "TestIKLookAt": {
+   "lines": 9,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 9,
+   "unused": 0
+  },
+  "TextShadowPositioner": {
+   "lines": 98,
+   "ported": 51,
+   "checked": 0,
+   "to port": 47,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TextShadower": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 11,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TimeLimit": {
+   "lines": 92,
+   "ported": 58,
+   "checked": 0,
+   "to port": 34,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TriggeredByAllPlayers": {
+   "lines": 53,
+   "ported": 0,
+   "checked": 17,
+   "to port": 36,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TriggeredByAnyPlayer": {
+   "lines": 9,
+   "ported": 9,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TrivialFPS": {
+   "lines": 20,
+   "ported": 20,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "TrivialFPSEnabler": {
+   "lines": 9,
+   "ported": 9,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "UniqueClientNumber": {
+   "lines": 59,
+   "ported": 44,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 15
+  },
+  "UnsafeRespawnArea": {
+   "lines": 44,
+   "ported": 28,
+   "checked": 0,
+   "to port": 16,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "UpdateWhenDisabledHelper": {
+   "lines": 22,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 22,
+   "unused": 0
+  },
+  "UpgradeButton": {
+   "lines": 20,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 20,
+   "unused": 0
+  },
+  "Utility": {
+   "lines": 177,
+   "ported": 41,
+   "checked": 0,
+   "to port": 136,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "VehicleOccupant": {
+   "lines": 75,
+   "ported": 71,
+   "checked": 0,
+   "to port": 4,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "VehicleOccupantIK": {
+   "lines": 23,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 23
+  },
+  "VersionNumberLabel": {
+   "lines": 12,
+   "ported": 12,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "VersusGameEnder": {
+   "lines": 114,
+   "ported": 68,
+   "checked": 0,
+   "to port": 46,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "VersusScoreTable": {
+   "lines": 111,
+   "ported": 101,
+   "checked": 0,
+   "to port": 10,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "VersusScoreUI": {
+   "lines": 22,
+   "ported": 22,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ViewportAnchor": {
+   "lines": 23,
+   "ported": 23,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "WatchTrailerButton": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 11,
+   "unused": 0
+  },
+  "Wave": {
+   "lines": 11,
+   "ported": 0,
+   "checked": 0,
+   "to port": 11,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "WeaponIndicatorUI": {
+   "lines": 61,
+   "ported": 17,
+   "checked": 0,
+   "to port": 44,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "WebLink": {
+   "lines": 52,
+   "ported": 52,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "Whale": {
+   "lines": 37,
+   "ported": 0,
+   "checked": 0,
+   "to port": 37,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XInputController": {
+   "lines": 25,
+   "ported": 0,
+   "checked": 0,
+   "to port": 0,
+   "nothing to port": 25,
+   "unused": 0
+  },
+  "XboxishGamepad": {
+   "lines": 47,
+   "ported": 0,
+   "checked": 47,
+   "to port": 0,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XboxishGamepadCharacterInput": {
+   "lines": 59,
+   "ported": 13,
+   "checked": 0,
+   "to port": 46,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XboxishGamepadHelicopterGunnerInput": {
+   "lines": 17,
+   "ported": 0,
+   "checked": 0,
+   "to port": 17,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XboxishGamepadHelicopterInput": {
+   "lines": 26,
+   "ported": 11,
+   "checked": 0,
+   "to port": 15,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XboxishGamepadLobbyInput": {
+   "lines": 37,
+   "ported": 0,
+   "checked": 0,
+   "to port": 37,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XboxishGamepadMenuInput": {
+   "lines": 5,
+   "ported": 0,
+   "checked": 0,
+   "to port": 5,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "XboxishGamepadProcessor": {
+   "lines": 10,
+   "ported": 0,
+   "checked": 0,
+   "to port": 10,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "ZeroShotPerfectHealthGoals": {
+   "lines": 81,
+   "ported": 0,
+   "checked": 0,
+   "to port": 81,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "tk2dSlicedSprite": {
+   "lines": 316,
+   "ported": 76,
+   "checked": 0,
+   "to port": 240,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "tk2dSpriteGeomGen": {
+   "lines": 538,
+   "ported": 162,
+   "checked": 0,
+   "to port": 376,
+   "nothing to port": 0,
+   "unused": 0
+  },
+  "tk2dTextMesh": {
+   "lines": 517,
+   "ported": 154,
+   "checked": 0,
+   "to port": 363,
+   "nothing to port": 0,
+   "unused": 0
+  }
+ }
+}

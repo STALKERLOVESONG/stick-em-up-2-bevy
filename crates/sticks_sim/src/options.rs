@@ -143,6 +143,9 @@ impl Cheats {
 /// What a launcher starts the game with.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LaunchOptions {
+    /// Only what the original game has: no cheats, no internet play, no rooms, no working Send
+    /// Link, LAN games as the original announces them.
+    pub original_only: bool,
     pub cheats: Cheats,
     /// The original's `AllLevelUnlockCheat`: every level can be picked.
     pub unlock_all_levels: bool,
@@ -165,6 +168,7 @@ impl LaunchOptions {
                 "show_hotkeys" => c.show_hotkeys = on.unwrap_or(c.show_hotkeys),
                 "speed" => c.speed = value.parse::<usize>().ok().filter(|&s| s < GAME_SPEEDS.len()).unwrap_or(c.speed),
                 "unlock_all_levels" => o.unlock_all_levels = on.unwrap_or(o.unlock_all_levels),
+                "original_only" => o.original_only = on.unwrap_or(o.original_only),
                 "player_name" => o.player_name = clean_name(value),
                 _ => {}
             }
@@ -175,8 +179,8 @@ impl LaunchOptions {
     pub fn to_text(&self) -> String {
         let c = &self.cheats;
         let mut text = format!(
-            "god = {}\ninfinite_lives = {}\nrapid_fire = {}\nall_weapons = {}\nhelicopter_god = {}\nspeed = {}\nshow_hotkeys = {}\nunlock_all_levels = {}\n",
-            c.god, c.infinite_lives, c.rapid_fire, c.all_weapons, c.helicopter_god, c.speed, c.show_hotkeys, self.unlock_all_levels
+            "original_only = {}\ngod = {}\ninfinite_lives = {}\nrapid_fire = {}\nall_weapons = {}\nhelicopter_god = {}\nspeed = {}\nshow_hotkeys = {}\nunlock_all_levels = {}\n",
+            self.original_only, c.god, c.infinite_lives, c.rapid_fire, c.all_weapons, c.helicopter_god, c.speed, c.show_hotkeys, self.unlock_all_levels
         );
         if let Some(name) = &self.player_name {
             text.push_str(&format!("player_name = {name}\n"));
@@ -188,6 +192,15 @@ impl LaunchOptions {
     /// (nothing switched on) when the game was not started by a launcher.
     pub fn from_environment() -> LaunchOptions {
         std::env::var(LAUNCH_OPTIONS_VARIABLE).map_or_else(|_| LaunchOptions::default(), |t| LaunchOptions::parse(&t.replace(';', "\n")))
+    }
+
+    /// What the game is started with: in original-only mode nothing of the additions travels.
+    pub fn effective(&self) -> LaunchOptions {
+        if self.original_only {
+            LaunchOptions { original_only: true, ..LaunchOptions::default() }
+        } else {
+            self.clone()
+        }
     }
 
     /// The value for [`LAUNCH_OPTIONS_VARIABLE`] (one line: `;` separates the entries).
@@ -225,12 +238,17 @@ mod tests {
     #[test]
     fn launch_options_round_trip_through_the_environment_form() {
         let o = LaunchOptions {
+            original_only: false,
             cheats: Cheats { god: true, rapid_fire: true, speed: 3, show_hotkeys: true, ..Cheats::default() },
             unlock_all_levels: true,
             player_name: Some("Big Dan".to_owned()),
         };
         assert_eq!(LaunchOptions::parse(&o.to_text()), o);
         assert_eq!(LaunchOptions::parse(&o.to_environment().replace(';', "\n")), o);
+        let original = LaunchOptions { original_only: true, ..o.clone() };
+        assert_eq!(LaunchOptions::parse(&original.to_text()), original);
+        assert_eq!(original.effective(), LaunchOptions { original_only: true, ..LaunchOptions::default() });
+        assert_eq!(o.effective(), o);
         assert!(!o.to_environment().contains('\n'));
         assert_eq!(LaunchOptions::parse("speed = 9\ngod = maybe"), LaunchOptions::default());
         assert_eq!(clean_name("  a;b/c\n "), Some("abc".to_owned()));

@@ -272,6 +272,9 @@ impl Net {
 
     /// The internet end point, started on first use.
     pub fn p2p(&mut self) -> Option<&P2p> {
+        if crate::settings::original_only() {
+            return None;
+        }
         if self.p2p.is_none() && !self.p2p_failed {
             match P2p::start() {
                 Ok(p) => self.p2p = Some(p),
@@ -310,7 +313,9 @@ impl Net {
             }
             Err(e) => return Err(e),
         };
-        host.max_connections = usize::from(config.max_machines.saturating_sub(1));
+        if !crate::settings::original_only() {
+            host.max_connections = usize::from(config.max_machines.saturating_sub(1));
+        }
         let room = Room { name: config.name.clone(), locked: config.locked(), max_machines: config.max_machines, members: vec![RoomMember { number: 0, name: machine_name(), ready: true }] };
         let announcement = sticks_net::discovery::announcement(NETWORK_VERSION, SERVER_PORT, Some(&room.info()));
         if let Some(p2p) = self.p2p() {
@@ -323,6 +328,10 @@ impl Net {
         self.client_number = Some(0);
         self.ready = true;
         self.deliberate = false;
+        if crate::settings::original_only() {
+            // The original's host: announced by its machine name, no room.
+            return Ok(());
+        }
         info!("room \"{}\" for {} machines{}", config.name, config.max_machines, if config.locked() { ", with a password" } else { "" });
         self.room_config = Some(config);
         self.broadcast_room();

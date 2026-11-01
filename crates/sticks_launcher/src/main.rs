@@ -7,6 +7,8 @@
 //!   original's own `AllLevelUnlockCheat`).
 //! * Settings are written to `Settings.txt`, which the game reads; the game has no settings
 //!   screen of its own.
+//! * "Original Game Only" starts the game with none of the additions (cheats, internet play,
+//!   rooms, the working Send Link): the original as it was.
 //! * The launcher remembers its choices in `Launcher.txt` next to the save files.
 
 use std::path::PathBuf;
@@ -34,6 +36,7 @@ const NAME_LENGTH: usize = 25;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
+    Original,
     God,
     InfiniteLives,
     RapidFire,
@@ -51,7 +54,7 @@ enum Action {
 }
 
 const CHEAT_ROWS: [Action; 8] = [Action::God, Action::InfiniteLives, Action::RapidFire, Action::AllWeapons, Action::HelicopterGod, Action::Speed, Action::ShowHotkeys, Action::UnlockLevels];
-const SETTING_ROWS: [Action; 4] = [Action::Music, Action::Sound, Action::Fullscreen, Action::VSync];
+const SETTING_ROWS: [Action; 5] = [Action::Original, Action::Music, Action::Sound, Action::Fullscreen, Action::VSync];
 
 impl Action {
     /// Needs the game's debug hacks.
@@ -59,8 +62,12 @@ impl Action {
         matches!(self, Action::God | Action::InfiniteLives | Action::RapidFire | Action::AllWeapons | Action::HelicopterGod | Action::Speed | Action::ShowHotkeys)
     }
 
-    fn available(self) -> bool {
-        !self.is_hack() || CHEATS_BUILT_IN
+    fn available(self, choices: &Choices) -> bool {
+        match self {
+            Action::UnlockLevels => !choices.launch.original_only,
+            a if a.is_hack() => CHEATS_BUILT_IN && !choices.launch.original_only,
+            _ => true,
+        }
     }
 }
 
@@ -95,6 +102,12 @@ fn percent(v: f32) -> String {
 impl Choices {
     fn label(&self, action: Action) -> String {
         let c = &self.launch.cheats;
+        if self.launch.original_only && (action.is_hack() || action == Action::UnlockLevels) {
+            return match action {
+                Action::God => "Cheats: off (original game)".to_owned(),
+                _ => "(original game)".to_owned(),
+            };
+        }
         if action.is_hack() && !CHEATS_BUILT_IN {
             return match action {
                 Action::God => "God Mode: not built in".to_owned(),
@@ -102,6 +115,7 @@ impl Choices {
             };
         }
         match action {
+            Action::Original => format!("Original Game Only: {}", on_off(self.launch.original_only)),
             Action::God => format!("God Mode: {}", on_off(c.god)),
             Action::InfiniteLives => format!("Infinite Lives: {}", on_off(c.infinite_lives)),
             Action::RapidFire => format!("Rapid Fire: {}", on_off(c.rapid_fire)),
@@ -122,6 +136,7 @@ impl Choices {
     fn press(&mut self, action: Action) {
         let c = &mut self.launch.cheats;
         match action {
+            Action::Original => self.launch.original_only = !self.launch.original_only,
             Action::God => c.god = !c.god,
             Action::InfiniteLives => c.infinite_lives = !c.infinite_lives,
             Action::RapidFire => c.rapid_fire = !c.rapid_fire,
@@ -156,7 +171,7 @@ impl Choices {
             return Err("The game was not found next to the launcher.\nBuild sticks_game first.".to_owned());
         }
         let mut command = std::process::Command::new(&exe);
-        command.env(LAUNCH_OPTIONS_VARIABLE, self.launch.to_environment());
+        command.env(LAUNCH_OPTIONS_VARIABLE, self.launch.effective().to_environment());
         if let Some(root) = &self.export_root {
             command.env("STICK_EXPORT_ROOT", root);
         }
@@ -227,10 +242,10 @@ fn setup(
     for (i, &a) in SETTING_ROWS.iter().enumerate() {
         add_button(&mut s, &mut paper, a, Vec2::new(COLUMNS[1], row(i)), size);
     }
-    heading(&mut s, "Online Name", Vec2::new(COLUMNS[1], row(4) - 0.4));
-    let name = s.field(None, Vec3::new(COLUMNS[1], row(5) - 0.4, 1.0), size, 3, "Click to type a name", false, NAME_LENGTH);
+    heading(&mut s, "Online Name", Vec2::new(COLUMNS[1], row(5) - 0.2));
+    let name = s.field(None, Vec3::new(COLUMNS[1], row(6) - 0.2, 1.0), size, 3, "Click to type a name", false, NAME_LENGTH);
     s.commands.entity(name).insert((NameField, PaperField { text: choices.launch.player_name.clone().unwrap_or_default(), placeholder: "Click to type a name".to_owned(), secret: false, max: NAME_LENGTH, focused: false }));
-    note(&mut s, "Network games: Start Network Game makes\na room; Send Link copies its invitation.\nFriends copy it to see the room.", Vec2::new(COLUMNS[1], row(7) + 0.2));
+    note(&mut s, "Start Network Game makes a room;\nCopy Invite gives friends the link.", Vec2::new(COLUMNS[1], row(7) - 0.4));
 
     add_button(&mut s, &mut paper, Action::Play, Vec2::new(COLUMNS[2], row(0) - 1.0), Vec2::new(COLUMN_WIDTH, ROW_HEIGHT * 2.1));
     add_button(&mut s, &mut paper, Action::Quit, Vec2::new(COLUMNS[2], row(2) - 1.0), size);
@@ -303,8 +318,9 @@ fn refresh(
     mut status: Query<&mut PaperLabel, With<StatusLine>>,
 ) {
     for (&LauncherButton(action), mut button, children) in &mut buttons {
-        if button.enabled != action.available() {
-            button.enabled = action.available();
+        let available = action.available(&choices);
+        if button.enabled != available {
+            button.enabled = available;
         }
         let text = choices.label(action);
         for child in children.to_vec() {
