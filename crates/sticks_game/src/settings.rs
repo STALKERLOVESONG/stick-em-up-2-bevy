@@ -1,7 +1,7 @@
 //! Player settings (not in the original, which had none on desktop): music and sound volume,
-//! fullscreen, vertical sync. Changed on the Lobby's settings page (`lobby::settings_page`) or in
-//! the launcher, applied to the window and the audio at once, and kept in `Settings.txt` next to
-//! the save files (`sticks_sim::options`).
+//! fullscreen, vertical sync. Chosen in the launcher (the game has no settings screen), read from
+//! `Settings.txt` next to the save files (`sticks_sim::options`) and applied to the window and
+//! the audio.
 //!
 //! Also the options a launcher started the game with ([`Launch`]).
 

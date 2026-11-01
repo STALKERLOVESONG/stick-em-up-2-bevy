@@ -1,0 +1,11 @@
+[package]
+name = "sticks_paper"
+description = "Stick 'Em Up 2 reimplementation: flat paper-and-cardboard UI in the Lobby's style (its font, papers and shadows), for the launcher, the editors and the in-game room panel."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+bevy = { version = "0.19", features = ["wav"] }
+sticks_sim = { path = "../sticks_sim" }
+unity_data = { path = "../unity_data" }

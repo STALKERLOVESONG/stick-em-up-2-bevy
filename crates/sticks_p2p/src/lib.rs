@@ -119,6 +119,13 @@ impl P2p {
         rx
     }
 
+    /// What probes are answered with from now on (the room changed).
+    pub fn update_announcement(&self, announcement: Vec<u8>) {
+        if let Some(hosting) = lock(&self.shared.hosting).as_mut() {
+            hosting.announcement = announcement;
+        }
+    }
+
     /// Turn joining machines (and probes) away again.
     pub fn stop_hosting(&self) {
         *lock(&self.shared.hosting) = None;

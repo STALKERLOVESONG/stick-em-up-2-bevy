@@ -8,6 +8,9 @@
 //!   "assigned elsewhere" label and take no cards, claims go to the host;
 //! * `LobbyGameMode` / `LobbyDifficulty` / `LobbyLevelSelect` / `LobbyTeams` /
 //!   `RemoteColorAssignments`: changes are sent, received ones applied;
+//! * Rooms (not in the original): "Start Network Game" opens the create-room dialog (name,
+//!   password, size; `super::room`), a locked room asks for its password before joining, and
+//!   the join buttons show each room's name, size and lock;
 //! * `SendStarterEditionLinkPrompt`: the original hides its "Send Link" button on desktop
 //!   (it shared a store link to the free Starter Edition on phones). Here the button works: it
 //!   copies an invitation with the game's code (`seu2://<code>/<name>`, see `sticks_p2p`) to
@@ -65,7 +68,20 @@ pub(super) struct NetworkScreens {
     next_clipboard: f32,
     invite: Option<Invite>,
     /// Send Link's confirmation text and how long it stays.
-    link_feedback: Option<(String, f32)>,
+    pub(super) link_feedback: Option<(String, f32)>,
+    /// The room panel is open (rather than its bar).
+    pub show_room: bool,
+    /// A dialog over the screens.
+    pub dialog: Option<Dialog>,
+}
+
+/// Dialogs of the network screens (drawn by `super::room`).
+#[derive(Clone, Debug)]
+pub enum Dialog {
+    /// "Start Network Game": the room's name, password and size; then the original's next screen.
+    CreateRoom { next: Option<usize>, failed_label: Option<usize> },
+    /// Joining a locked room.
+    Password { listing: ServerListing, success: Option<usize>, error: Option<usize>, return_to: usize },
 }
 
 /// The game code of an invitation (`seu2://<code>/DESKTOP-1`) anywhere in `text`; the name
@@ -283,7 +299,7 @@ fn connection_screen(lobby: &mut Lobby, net: &mut Net, dt: f32) {
     if let Some(join) = join {
         lobby.active[join] = servers.len() == 1;
         if let Some(listing) = servers.first().filter(|_| servers.len() == 1) {
-            lobby.set_button_text(join, &format!("Join Game: {}", listing.name()));
+            lobby.set_button_text(join, &format!("Join Game: {}", listing.room().label()));
         }
     }
     if let Some(show) = show {
@@ -319,8 +335,7 @@ fn server_list(lobby: &mut Lobby, net: &mut Net) {
         let listing = servers.get(first + i);
         lobby.active[button] = listing.is_some();
         if let Some(listing) = listing {
-            let name = listing.name();
-            lobby.set_button_text(button, &name);
+            lobby.set_button_text(button, &listing.room().label());
         }
     }
     let page = lobby.network.page;
@@ -371,7 +386,7 @@ fn send_link_prompt(lobby: &mut Lobby, net: &Net, dt: f32) {
 }
 
 /// The Send Link button: an invitation to this game on the clipboard, for a friend anywhere.
-fn send_link(lobby: &mut Lobby, net: &mut Net) {
+pub(super) fn send_link(lobby: &mut Lobby, net: &mut Net) {
     let code = if net.is_host() {
         net.game_code()
     } else {
@@ -459,20 +474,7 @@ pub(super) fn press(lobby: &mut Lobby, net: &mut Net, object: usize) -> bool {
     if let Some(s) = lobby.named_script("NetworkSetup").cloned() {
         let field = |lobby: &Lobby, name: &str| lobby.scene.field_object(&s, name);
         if field(lobby, "startNetworkGameButton") == Some(object) {
-            match net.start_host() {
-                Ok(()) => {
-                    if let Some(next) = field(lobby, "nextScreen") {
-                        lobby.activate(next);
-                    }
-                }
-                Err(e) => {
-                    warn!("cannot host a network game: {e}");
-                    if let Some(label) = field(lobby, "connectToWiFiLabel") {
-                        lobby.active[label] = true;
-                        lobby.flash_label(label);
-                    }
-                }
-            }
+            lobby.network.dialog = Some(Dialog::CreateRoom { next: field(lobby, "nextScreen"), failed_label: field(lobby, "connectToWiFiLabel") });
             return true;
         }
         if field(lobby, "joinNetworkGameButton") == Some(object) {
@@ -521,14 +523,7 @@ pub(super) fn press(lobby: &mut Lobby, net: &mut Net, object: usize) -> bool {
     for s in lobby.scene.scripts_named("LobbyEnder").cloned().collect::<Vec<_>>() {
         let pressed = |field: &str| lobby.scene.field_object(&s, field) == Some(object);
         if pressed("disconnectButton") || pressed("stopServerButton") {
-            // TODO(UNCERTAIN): the original's Disconnect leaves `DeliberateDisconnection` unset,
-            // which shows the "connection lost" error to the client who chose to leave; leaving
-            // is treated as deliberate here.
-            net.disconnect(true);
-            net.notices.retain(|n| !matches!(n, NetNotice::LostHost { .. }));
-            if let Some(screen) = lobby.scene.field_object(&s, "connectionScreen") {
-                lobby.activate(screen);
-            }
+            leave(lobby, net);
             return true;
         }
     }
@@ -541,9 +536,51 @@ pub(super) fn press(lobby: &mut Lobby, net: &mut Net, object: usize) -> bool {
     false
 }
 
-/// `ServerList.ConnectToServerOrShowVersionError`.
+/// `LobbyEnder`'s Disconnect / Stop Server (and the room's Leave): back to the connection screen.
+pub(super) fn leave(lobby: &mut Lobby, net: &mut Net) {
+    // TODO(UNCERTAIN): the original's Disconnect leaves `DeliberateDisconnection` unset, which
+    // shows the "connection lost" error to the client who chose to leave; leaving is treated as
+    // deliberate here.
+    net.disconnect(true);
+    net.notices.retain(|n| !matches!(n, NetNotice::LostHost { .. }));
+    lobby.network.show_room = false;
+    let screen = lobby.scene.scripts_named("LobbyEnder").find_map(|s| lobby.scene.field_object(s, "connectionScreen"));
+    if let Some(screen) = screen {
+        lobby.activate(screen);
+    }
+}
+
+/// "Start Network Game" after the create-room dialog: host, then the original's next screen
+/// (or its "connect to Wi-Fi" label flashing when hosting failed).
+pub(super) fn create_room(lobby: &mut Lobby, net: &mut Net, config: sticks_net::RoomConfig, next: Option<usize>, failed_label: Option<usize>) {
+    match net.start_host(config) {
+        Ok(()) => {
+            if let Some(next) = next {
+                lobby.activate(next);
+            }
+        }
+        Err(e) => {
+            warn!("cannot host a network game: {e}");
+            if let Some(label) = failed_label {
+                lobby.active[label] = true;
+                lobby.flash_label(label);
+            }
+        }
+    }
+}
+
+/// `ServerList.ConnectToServerOrShowVersionError`; a locked room asks for its password first.
 fn join(lobby: &mut Lobby, net: &mut Net, listing: &ServerListing, success: Option<usize>, error: Option<usize>, return_to: usize) {
-    match net.join(listing) {
+    if listing.room().locked {
+        lobby.network.dialog = Some(Dialog::Password { listing: listing.clone(), success, error, return_to });
+        return;
+    }
+    join_with(lobby, net, listing, "", success, error, return_to);
+}
+
+/// Join `listing` with `password`.
+pub(super) fn join_with(lobby: &mut Lobby, net: &mut Net, listing: &ServerListing, password: &str, success: Option<usize>, error: Option<usize>, return_to: usize) {
+    match net.join(listing, password) {
         Ok(()) => {
             if let Some(screen) = success {
                 lobby.activate(screen);

@@ -92,6 +92,7 @@ impl Plugin for GamePlugin {
             .configure_sets(Update, (FrameSet::Input, FrameSet::FixedSteps, FrameSet::RoleInput, FrameSet::Characters, FrameSet::Camera).run_if(net::gameplay_ready))
             .add_plugins((level::LevelPlugin, life::LifePlugin, player::PlayerPlugin, camera::CameraPlugin, weapon::WeaponPlugin, enemy::EnemyPlugin, figure::FigurePlugin, menu::MenuPlugin, hud::HudPlugin, letters::LettersPlugin, helicopter::HelicopterPlugin, loading::LoadingPlugin, debug::DebugPlugin, devscript::DevScriptPlugin))
             .add_plugins((unity_render::UnityRenderPlugin, lobby::LobbyPlugin, effects::EffectsPlugin, audio::GameAudioPlugin, vehicles::VehiclePlugin, ingame_ui::InGameUiPlugin, level_end::LevelEndPlugin, save::SavePlugin, scenery::SceneryPlugin, input::InputPlugin, versus::VersusPlugin, net::NetPlugin, settings::SettingsPlugin));
+        app.add_plugins(sticks_paper::PaperPlugin);
         #[cfg(debug_hacks)]
         app.add_plugins(hacks::HacksPlugin);
     }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/unity_compat", "crates/unity_data", "crates/sticks_sim", "crates/sticks_net", "crates/sticks_p2p", "crates/sticks_game", "crates/sticks_launcher"]
+members = ["crates/unity_compat", "crates/unity_data", "crates/sticks_sim", "crates/sticks_net", "crates/sticks_p2p", "crates/sticks_paper", "crates/sticks_game", "crates/sticks_launcher"]
 
 [workspace.package]
 version = "0.1.0"

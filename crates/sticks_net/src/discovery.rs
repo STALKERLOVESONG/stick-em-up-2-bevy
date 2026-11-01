@@ -25,7 +25,7 @@ pub const SERVER_PORT: u16 = 25790;
 /// this game speaks a different protocol on the same port, so it announces a higher version and
 /// the original's rule applies across the two: "The host of that game is running a newer
 /// version" one way, "an older version" the other.
-pub const NETWORK_VERSION: u32 = 1005;
+pub const NETWORK_VERSION: u32 = 1006;
 /// `Server.broadcastInterval`.
 pub const BROADCAST_INTERVAL: Duration = Duration::from_secs(1);
 /// `Client.GetServerList`: advertisements older than 2250 ms are dropped.
@@ -70,6 +70,11 @@ impl ServerListing {
 
     pub fn is_online(&self) -> bool {
         matches!(self.address, GameAddress::Online(_))
+    }
+
+    /// The room the info describes (name, size, lock).
+    pub fn room(&self) -> crate::room::RoomSummary {
+        crate::room::RoomSummary::parse(self.info.as_deref().unwrap_or(&self.name()))
     }
 }
 

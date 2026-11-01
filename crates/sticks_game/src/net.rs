@@ -36,7 +36,8 @@ use bevy::ecs::entity_disabling::Disabled;
 use bevy::ecs::query::Allow;
 use bevy::prelude::*;
 use sticks_net::discovery::{Broadcaster, Listener, version_mismatch_message};
-use sticks_net::{AvatarState, Client, ClientEvent, GameAddress, HelicopterState, Host, HostEvent, LoadKind, LobbySettings, Machine, Message, NETWORK_VERSION, NetId, PeerId, SERVER_PORT, ServerListing, SlotTable, WireControls, WirePlayerId, WireScore};
+use sticks_net::room::{MAX_CHAT, MAX_NAME, clean};
+use sticks_net::{AvatarState, Client, ClientEvent, GameAddress, HelicopterState, Host, HostEvent, LoadKind, LobbySettings, Machine, Message, NETWORK_VERSION, NetId, PeerId, Room, RoomConfig, RoomMember, SERVER_PORT, ServerListing, SlotTable, WireControls, WirePlayerId, WireScore};
 use sticks_p2p::P2p;
 use sticks_sim::character::DEFAULT_Z;
 use sticks_sim::level_end::PlayerId;
@@ -92,6 +93,16 @@ pub struct LoadCommand {
 pub const LOBBY_LEVEL: &str = "Lobby";
 pub const COMPLETE_LEVEL: &str = "Complete";
 
+/// A line of a room's chat; `from` is `None` for the room's own notices (joins, leaves).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatLine {
+    pub from: Option<String>,
+    pub text: String,
+}
+
+/// Chat lines kept.
+const CHAT_HISTORY: usize = 60;
+
 /// The latest stream of an object owned elsewhere.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ReceivedAvatar {
@@ -137,6 +148,18 @@ pub struct Net {
     numbers: HashMap<PeerId, u32>,
     /// The host this client joined.
     pub host_address: Option<GameAddress>,
+    /// The room this machine hosts or is in (not in the original).
+    pub room: Option<Room>,
+    /// Host: the room's settings.
+    room_config: Option<RoomConfig>,
+    /// Host: each client's name and readiness.
+    members: HashMap<PeerId, (String, bool)>,
+    /// Client: the password sent with `Hello`.
+    join_password: String,
+    /// The room's chat, oldest first.
+    pub chat: Vec<ChatLine>,
+    /// Changes whenever the room or the chat does.
+    pub room_revision: u64,
     /// `ClientDisconnection.DeliberateDisconnection`.
     deliberate: bool,
     pub notices: Vec<NetNotice>,
@@ -274,7 +297,7 @@ impl Net {
     /// `Network.InitializeServer(4, 25790, false)`: on the LAN port, and by game code on the
     /// internet. Either is enough (a second copy of the game on one machine cannot have the LAN
     /// port).
-    pub fn start_host(&mut self) -> std::io::Result<()> {
+    pub fn start_host(&mut self, config: RoomConfig) -> std::io::Result<()> {
         self.disconnect(true);
         let mut host = match Host::start(SERVER_PORT) {
             Ok(host) => {
@@ -287,7 +310,9 @@ impl Net {
             }
             Err(e) => return Err(e),
         };
-        let announcement = sticks_net::discovery::announcement(NETWORK_VERSION, SERVER_PORT, Some(&machine_name()));
+        host.max_connections = usize::from(config.max_machines.saturating_sub(1));
+        let room = Room { name: config.name.clone(), locked: config.locked(), max_machines: config.max_machines, members: vec![RoomMember { number: 0, name: machine_name(), ready: true }] };
+        let announcement = sticks_net::discovery::announcement(NETWORK_VERSION, SERVER_PORT, Some(&room.info()));
         if let Some(p2p) = self.p2p() {
             host.accept_links(p2p.host(announcement));
             info!("hosting on the internet too (the game code is on the invitation)");
@@ -298,7 +323,89 @@ impl Net {
         self.client_number = Some(0);
         self.ready = true;
         self.deliberate = false;
+        info!("room \"{}\" for {} machines{}", config.name, config.max_machines, if config.locked() { ", with a password" } else { "" });
+        self.room_config = Some(config);
+        self.broadcast_room();
         Ok(())
+    }
+
+    /// Host: the room as it is now, to everybody (and into the announcements).
+    fn broadcast_room(&mut self) {
+        let Some(config) = &self.room_config else { return };
+        let mut clients: Vec<RoomMember> = self
+            .members
+            .iter()
+            .map(|(peer, (name, ready))| RoomMember { number: self.numbers.get(peer).copied().unwrap_or(u32::MAX), name: name.clone(), ready: *ready })
+            .collect();
+        clients.sort_by_key(|m| m.number);
+        let mut members = vec![RoomMember { number: 0, name: machine_name(), ready: true }];
+        members.extend(clients);
+        let room = Room { name: config.name.clone(), locked: config.locked(), max_machines: config.max_machines, members };
+        if let Some(p2p) = &self.p2p {
+            p2p.update_announcement(sticks_net::discovery::announcement(NETWORK_VERSION, SERVER_PORT, Some(&room.info())));
+        }
+        self.send(&Message::RoomInfo(room.clone()));
+        self.room = Some(room);
+        self.room_revision += 1;
+    }
+
+    fn add_chat(&mut self, from: Option<String>, text: String) {
+        self.chat.push(ChatLine { from, text });
+        if self.chat.len() > CHAT_HISTORY {
+            self.chat.remove(0);
+        }
+        self.room_revision += 1;
+    }
+
+    /// Host: a line everybody sees as the room's (joins, leaves, "waiting for …").
+    pub fn announce(&mut self, text: &str) {
+        if self.is_host() {
+            self.add_chat(None, text.to_owned());
+            self.send(&Message::Chat { from: String::new(), text: text.to_owned() });
+        }
+    }
+
+    /// Say something in the room's chat.
+    pub fn send_chat(&mut self, text: &str) {
+        let text = clean(text, MAX_CHAT);
+        if text.is_empty() {
+            return;
+        }
+        if self.is_host() {
+            let from = machine_name();
+            self.add_chat(Some(from.clone()), text.clone());
+            self.send(&Message::Chat { from, text });
+        } else if self.role == NetRole::Client {
+            self.send(&Message::Chat { from: String::new(), text });
+        }
+    }
+
+    /// Client: tell the host whether this machine is ready to play.
+    pub fn set_ready(&mut self, ready: bool) {
+        if self.role == NetRole::Client {
+            self.send(&Message::Ready(ready));
+        }
+    }
+
+    /// Whether this machine is ready, as the room says (the host always is).
+    pub fn is_ready(&self) -> bool {
+        self.is_host() || self.room.as_ref().zip(self.client_number).is_some_and(|(r, n)| r.members.iter().any(|m| m.number == n && m.ready))
+    }
+
+    /// The host may start: every machine in the room is ready.
+    pub fn everyone_ready(&self) -> bool {
+        self.room.as_ref().is_none_or(Room::everyone_ready)
+    }
+
+    /// Host: send the machine with `number` away.
+    pub fn kick(&mut self, number: u32) {
+        let Some(peer) = self.numbers.iter().find(|(_, n)| **n == number).map(|(p, _)| *p) else { return };
+        self.send_to(peer, &Message::Refused { reason: "The host removed you from the room.".to_owned() });
+        if let Some(host) = &mut self.host {
+            host.flush();
+            host.kick(peer);
+        }
+        self.client_left(peer);
     }
 
     /// `NetworkUtility.ConnectTo`.
@@ -348,6 +455,11 @@ impl Net {
     }
 
     fn reset_session(&mut self) {
+        self.room = None;
+        self.room_config = None;
+        self.members.clear();
+        self.chat.clear();
+        self.room_revision += 1;
         self.slots.reset();
         self.logged_in = None;
         self.colors = Default::default();
@@ -404,12 +516,17 @@ impl Net {
         self.listening = true;
     }
 
-    /// `ServerList.ConnectToServerOrShowVersionError`: `Err` is the original's message.
-    pub fn join(&mut self, listing: &ServerListing) -> Result<(), &'static str> {
+    /// `ServerList.ConnectToServerOrShowVersionError`: `Err` is the original's message (or that
+    /// the room is full). `password` is sent to a locked room.
+    pub fn join(&mut self, listing: &ServerListing, password: &str) -> Result<(), &'static str> {
         if let Some(message) = version_mismatch_message(NETWORK_VERSION, listing.version) {
             return Err(message);
         }
+        if listing.room().is_full() {
+            return Err("That room is full.");
+        }
         self.connect(listing.address.clone());
+        self.join_password = clean(password, MAX_NAME);
         Ok(())
     }
 
@@ -456,6 +573,11 @@ impl Net {
         }
         self.loaded = std::iter::once(Machine::Host).chain(self.host.iter().flat_map(|h| h.peers().map(Machine::Client))).map(|m| (m, false)).collect();
         self.ready = false;
+        // Everybody says they are ready again for the next game.
+        for (_, ready) in self.members.values_mut() {
+            *ready = false;
+        }
+        self.broadcast_room();
         self.game_owners = std::array::from_fn(|i| self.slots.holder(i).or(self.slots.assigned_to_us(i).then_some(Machine::Host)));
         self.send(&Message::LoadLevel {
             level: command.level.clone(),
@@ -509,8 +631,9 @@ impl Net {
 
     /// The host has entered the Lobby again: `ConnectionLimitSetter.Awake`.
     pub fn back_in_lobby(&mut self) {
+        let limit = self.room_config.as_ref().map_or(sticks_net::transport::MAX_CONNECTIONS, |c| usize::from(c.max_machines.saturating_sub(1)));
         if let Some(host) = &mut self.host {
-            host.max_connections = sticks_net::transport::MAX_CONNECTIONS;
+            host.max_connections = limit;
         }
         self.ready = true;
         self.clear_game_streams();
@@ -555,8 +678,8 @@ impl Net {
     fn poll(&mut self) {
         let now = Instant::now();
         if self.host.as_ref().is_some_and(Host::on_lan) {
-            let name = machine_name();
-            self.broadcaster.broadcast(now, SERVER_PORT, &name);
+            let info = self.room.as_ref().map_or_else(machine_name, Room::info);
+            self.broadcaster.broadcast(now, SERVER_PORT, &info);
         }
         if self.listening {
             self.servers = self.listener.servers(now);
@@ -585,7 +708,8 @@ impl Net {
                 match event {
                     ClientEvent::Connected => {
                         let name = machine_name();
-                        self.send(&Message::Hello { version: NETWORK_VERSION, name });
+                        let password = self.join_password.clone();
+                        self.send(&Message::Hello { version: NETWORK_VERSION, name, password });
                     }
                     ClientEvent::Failed(reason) => {
                         warn!("could not connect: {reason}");
@@ -613,6 +737,10 @@ impl Net {
 
     fn client_left(&mut self, peer: PeerId) {
         info!("client {peer} left");
+        if let Some((name, _)) = self.members.remove(&peer) {
+            self.announce(&format!("{name} left."));
+            self.broadcast_room();
+        }
         self.numbers.remove(&peer);
         self.slots.disconnected(peer);
         self.broadcast_assignments(None);
@@ -626,9 +754,17 @@ impl Net {
 
     fn host_message(&mut self, peer: PeerId, message: Message) {
         match message {
-            Message::Hello { version, name } => {
-                if version != NETWORK_VERSION {
-                    let reason = version_mismatch_message(NETWORK_VERSION, version).unwrap_or_default().to_owned();
+            Message::Hello { version, name, password } => {
+                let refusal = if version != NETWORK_VERSION {
+                    Some(version_mismatch_message(NETWORK_VERSION, version).unwrap_or_default().to_owned())
+                } else if self.room_config.as_ref().is_some_and(|c| c.locked() && c.password != password) {
+                    Some("Wrong password.".to_owned())
+                } else if self.room_config.as_ref().is_some_and(|c| self.members.len() + 1 >= usize::from(c.max_machines)) {
+                    Some("That room is full.".to_owned())
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
                     self.send_to(peer, &Message::Refused { reason });
                     if let Some(host) = &mut self.host {
                         host.flush();
@@ -636,6 +772,10 @@ impl Net {
                     }
                     return;
                 }
+                let name = match clean(&name, MAX_NAME) {
+                    n if n.is_empty() => format!("Player {peer}"),
+                    n => n,
+                };
                 info!("client {peer} is {name}");
                 // `UniqueClientNumber.OnPlayerConnected`: one more than the highest.
                 let number = self.numbers.values().copied().max().unwrap_or(0) + 1;
@@ -652,6 +792,26 @@ impl Net {
                         let c = self.colors[slot];
                         self.send_to(peer, &Message::Colors { slot: slot as u8, body: color3(c.body), helmet: color3(c.helmet), face: color3(c.face) });
                     }
+                }
+                // The room: the newcomer gets the chat so far, then everybody the members.
+                for line in self.chat.clone() {
+                    self.send_to(peer, &Message::Chat { from: line.from.unwrap_or_default(), text: line.text });
+                }
+                self.members.insert(peer, (name.clone(), false));
+                self.announce(&format!("{name} joined."));
+                self.broadcast_room();
+            }
+            Message::Ready(ready) => {
+                if let Some(member) = self.members.get_mut(&peer) {
+                    member.1 = ready;
+                    self.broadcast_room();
+                }
+            }
+            Message::Chat { text, .. } => {
+                let text = clean(&text, MAX_CHAT);
+                if let (false, Some((from, _))) = (text.is_empty(), self.members.get(&peer).cloned()) {
+                    self.add_chat(Some(from.clone()), text.clone());
+                    self.send(&Message::Chat { from, text });
                 }
             }
             Message::Settings(s) => {
@@ -740,6 +900,14 @@ impl Net {
             Message::Lives { .. } | Message::Respawn { .. } => {}
             Message::Goodbye => {
                 info!("the host stopped the game");
+            }
+            Message::RoomInfo(room) => {
+                self.room = Some(room);
+                self.room_revision += 1;
+            }
+            Message::Chat { from, text } => {
+                let from = (!from.is_empty()).then(|| clean(&from, MAX_NAME));
+                self.add_chat(from, clean(&text, MAX_CHAT));
             }
             other => warn!("the host sent {other:?}, which only clients send"),
         }

@@ -26,3 +26,10 @@ Thumbs.db
 /crates/sticks_game/src/hacks.rs
 build_log.txt
 claude_build.bat
+
+# Packaging output and what Setup.bat downloads / exports when run in this folder
+/dist/
+/packaging/tools/
+/packaging/assets_exported/
+/tools/
+/assets_exported/

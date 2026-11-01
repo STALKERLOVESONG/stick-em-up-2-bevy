@@ -1,6 +1,7 @@
 //! What host and clients say to each other. Each variant names the original's RPC or state
 //! stream it stands for.
 
+use crate::room::Room;
 use crate::wire::{DecodeError, Reader, Writer};
 
 /// Which networked object a state or event is about: a player slot's avatar
@@ -237,8 +238,8 @@ pub type WireColor = Option<[f32; 3]>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
-    /// Client → host on connecting.
-    Hello { version: u32, name: String },
+    /// Client → host on connecting: who it is, and the room's password if it has one.
+    Hello { version: u32, name: String, password: String },
     /// `UniqueClientNumber.ReceiveNumber`.
     Welcome { client_number: u32 },
     /// The host turned the client away (full, playing, other version).
@@ -282,6 +283,14 @@ pub enum Message {
     LevelEvent { kind: String, object: u64, values: Vec<i32> },
     /// The host left the game deliberately (`ClientDisconnection.DeliberateDisconnection`).
     Goodbye,
+
+    /// The room as it is now (host → clients, whenever it changes).
+    RoomInfo(Room),
+    /// A client is (not) ready to play (client → host).
+    Ready(bool),
+    /// A chat line: a client sends it with an empty `from`; the host sends everybody's (its own
+    /// too) with the sender's name filled in.
+    Chat { from: String, text: String },
 }
 
 impl Message {
@@ -298,10 +307,11 @@ impl Message {
             w.f32(c[2]);
         });
         match self {
-            Message::Hello { version, name } => {
+            Message::Hello { version, name, password } => {
                 w.u8(0);
                 w.u32(*version);
                 w.str(name);
+                w.str(password);
             }
             Message::Welcome { client_number } => {
                 w.u8(1);
@@ -414,6 +424,19 @@ impl Message {
                 w.list(values, |w, v| w.i32(*v));
             }
             Message::Goodbye => w.u8(19),
+            Message::RoomInfo(room) => {
+                w.u8(20);
+                room.write(&mut w);
+            }
+            Message::Ready(ready) => {
+                w.u8(21);
+                w.bool(*ready);
+            }
+            Message::Chat { from, text } => {
+                w.u8(22);
+                w.str(from);
+                w.str(text);
+            }
         }
         w.bytes
     }
@@ -425,7 +448,7 @@ impl Message {
         };
         let color = |r: &mut Reader| -> Result<WireColor, DecodeError> { r.option(|r| Ok([r.f32()?, r.f32()?, r.f32()?])) };
         let message = match r.u8()? {
-            0 => Message::Hello { version: r.u32()?, name: r.str()? },
+            0 => Message::Hello { version: r.u32()?, name: r.str()?, password: r.str()? },
             1 => Message::Welcome { client_number: r.u32()? },
             2 => Message::Refused { reason: r.str()? },
             3 => Message::Settings(LobbySettings { mode: r.u8()?, difficulty: r.i32()?, level_index: r.u32()?, teams: [r.u8()?, r.u8()?, r.u8()?, r.u8()?] }),
@@ -466,6 +489,9 @@ impl Message {
             17 => Message::HelicopterHealth { id: NetId::read(&mut r)?, remaining: r.f32()? },
             18 => Message::LevelEvent { kind: r.str()?, object: r.u64()?, values: r.list(|r| r.i32())? },
             19 => Message::Goodbye,
+            20 => Message::RoomInfo(Room::read(&mut r)?),
+            21 => Message::Ready(r.bool()?),
+            22 => Message::Chat { from: r.str()?, text: r.str()? },
             _ => return Err(DecodeError("unknown message")),
         };
         if !r.is_empty() {
@@ -487,7 +513,15 @@ mod tests {
     fn every_message_round_trips() {
         let id = WirePlayerId { platform: None, id: "1".into(), name: "Player 2".into() };
         let controls = WireControls { movement: -0.2, jump: true, fire: true, aim: [0.6, 0.8], selected_weapon: Some(3), enter_vehicle: true, ..WireControls::default() };
-        round_trip(Message::Hello { version: 1005, name: "PC".into() });
+        round_trip(Message::Hello { version: 1005, name: "PC".into(), password: "pw".into() });
+        round_trip(Message::RoomInfo(Room {
+            name: "Room".into(),
+            locked: false,
+            max_machines: 3,
+            members: vec![crate::room::RoomMember { number: 0, name: "Host".into(), ready: true }],
+        }));
+        round_trip(Message::Ready(true));
+        round_trip(Message::Chat { from: "Dan".into(), text: "hi".into() });
         round_trip(Message::Welcome { client_number: 2 });
         round_trip(Message::Refused { reason: "full".into() });
         round_trip(Message::Settings(LobbySettings { mode: 2, difficulty: -1, level_index: 4, teams: [0, 1, 1, 0] }));

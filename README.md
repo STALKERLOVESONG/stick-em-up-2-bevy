@@ -15,7 +15,7 @@
 
 The original game was built in Unity 5. This project studies how it *behaves*: its physics, timings, AI, weapons, effects, audio and UI. It then rebuilds those systems as idiomatic Bevy ECS code: plugins, components, resources, messages and system sets. The code is not a line-by-line port. The goal is the same game on the screen, in a codebase designed for Bevy rather than for Unity.
 
-> **No game files are included.** This repository contains only original Rust code. To run it you need your own copy of *Stick 'Em Up 2*, exported to a Unity project folder (see [Running](#running)).
+> **No game files are included.** This repository contains only original Rust code. To run it you need your own copy of *Stick 'Em Up 2* [on Steam](https://store.steampowered.com/app/282780); `Setup.bat` exports its data for you (see [Playing](#playing)).
 
 ## Highlights
 
@@ -27,6 +27,8 @@ The original game was built in Unity 5. This project studies how it *behaves*: i
 - **Particles and audio**: rocket trails, explosions, fireworks, and a MasterAudio emulation (sound variations, fades, mixer volumes, 3D falloff, music cross-fades).
 - **Vehicles**: helicopters fly with the original flight model and enemy AI. Players can board, fly and leave their own.
 - **The original lobby**: title screen, control assignment, mode, level and difficulty selection, player slots.
+- **Network play with rooms**: LAN games as in the original, plus internet games peer to peer (no server). Hosts create a named room with an optional password and a size; the room panel shows who is in it and who is ready, has a chat, and the host can remove players.
+- **A launcher in the game's style**: cheats, settings and your online name on one cardboard screen drawn from the game's own art.
 
 ## Status
 
@@ -40,7 +42,8 @@ The original game was built in Unity 5. This project studies how it *behaves*: i
 | Audio | 🟡 implemented, playback being verified |
 | Vehicles | 🟡 helicopters done; cars, rockets, cannons to do |
 | UI & lobby | 🟡 main flow done; customisation screens to do |
-| Networking & game loop | 🟡 offline loop done; LAN and peer-to-peer internet play implemented, being tested |
+| Networking & game loop | 🟡 offline loop done; LAN and peer-to-peer internet rooms implemented, being tested |
+| Launcher | 🟡 cheats, settings and name done; gun maker and level editor planned |
 
 The detailed per-feature audit, including every behaviour still marked uncertain, is in [`IMPLEMENTATION_MAP.md`](IMPLEMENTATION_MAP.md).
 
@@ -51,9 +54,17 @@ flowchart LR
     compat["<b>unity_compat</b><br/>Unity numerics:<br/>Mathf, SmoothDamp,<br/>fixed-step time"]
     data["<b>unity_data</b><br/>Readers for the exported<br/>project: scenes, prefabs,<br/>sprites, fonts, audio"]
     sim["<b>sticks_sim</b><br/>Engine-free game rules:<br/>physics, character, AI,<br/>weapons, effects, audio"]
+    net["<b>sticks_net</b><br/>LAN discovery,<br/>connections, messages,<br/>rooms"]
+    p2p["<b>sticks_p2p</b><br/>Internet play<br/>peer to peer (iroh)"]
+    paper["<b>sticks_paper</b><br/>Paper UI in the<br/>Lobby's style"]
     game["<b>sticks_game</b><br/>Bevy app: states,<br/>plugins, input,<br/>rendering, sound"]
+    launcher["<b>sticks_launcher</b><br/>Cheats, settings,<br/>starts the game"]
     compat --> data --> sim --> game
     compat --> sim
+    net --> p2p --> game
+    net --> game
+    sim --> paper --> game
+    paper --> launcher
 ```
 
 | Crate | Uses Bevy | Responsibility |
@@ -61,13 +72,25 @@ flowchart LR
 | `unity_compat` | | Unity's math and timing behaviour, reproduced exactly |
 | `unity_data` | | Parses the exported Unity project into plain Rust data |
 | `sticks_sim` | | The game's rules and geometry, with no engine dependency, so they are unit-tested |
-| `sticks_game` | ✓ | The Bevy application: `LevelPlugin`, `PlayerPlugin`, `WeaponPlugin`, `EnemyPlugin`, `HelicopterPlugin`, `VehiclePlugin`, `EffectsPlugin`, `GameAudioPlugin`, `LobbyPlugin`, `HudPlugin`, … |
+| `sticks_net` | | Network play without the engine: LAN announcements in the original's format, framed connections, the message codec, player slots, rooms |
+| `sticks_p2p` | | Internet connections peer to peer through [iroh](https://iroh.computer) (QUIC, hole punching, relays when needed) |
+| `sticks_paper` | ✓ | Flat UI built from the Lobby's own font, papers and shadows (launcher, room panel) |
+| `sticks_game` | ✓ | The Bevy application: `LevelPlugin`, `PlayerPlugin`, `WeaponPlugin`, `EnemyPlugin`, `HelicopterPlugin`, `VehiclePlugin`, `EffectsPlugin`, `GameAudioPlugin`, `LobbyPlugin`, `HudPlugin`, `NetPlugin`, … |
+| `sticks_launcher` | ✓ | The launcher program |
 
 Keeping the rules in `sticks_sim` means behaviour is tested against the original's recovered constants without starting a window.
 
-## Running
+## Playing
 
-**You need** a recent stable Rust toolchain ([rustup.rs](https://rustup.rs)) and your own copy of *Stick 'Em Up 2*, exported to a Unity project. The game looks for the folder `ExportedProject`, which contains `Assets/` and `ProjectSettings/`.
+From a release zip (made with `Package.bat`, see [Sharing a build](#sharing-a-build)):
+
+1. Install *Stick 'Em Up 2* in Steam.
+2. Run **`Setup.bat`** once. It finds the game in your Steam libraries and exports its art, sounds and levels into `assets_exported\` with [AssetRipper](https://github.com/AssetRipper/AssetRipper) (GPL-3.0, downloaded from its releases on first use, not bundled). If the game is not installed, it says so and offers to open Steam to install or buy it.
+3. Start **`sticks_launcher.exe`**, pick cheats and settings, and press **Play**.
+
+## Building from source
+
+**You need** a recent stable Rust toolchain ([rustup.rs](https://rustup.rs)) and your own copy of *Stick 'Em Up 2*, exported to a Unity project (`packaging\Setup.bat` does that from Steam). The game looks for the folder `ExportedProject`, which contains `Assets/` and `ProjectSettings/`.
 
 Tell the game where that folder is, in one of three ways:
 
@@ -79,7 +102,8 @@ export STICK_EXPORT_ROOT=/path/to/ExportedProject    # Linux / macOS
 # 2. The first command-line argument
 cargo run --release -p sticks_game -- /path/to/ExportedProject
 
-# 3. Placing it at ../assets_exported/ExportedProject next to the repository
+# 3. Placing it in an assets_exported/ExportedProject folder next to the program or the
+#    repository (or any folder above them)
 ```
 
 Then:
@@ -100,13 +124,23 @@ cargo run --release -p sticks_game -- /path/to/ExportedProject "Assets/Game/Leve
 cargo run --release -p sticks_launcher
 ```
 
-A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), pick the volume, fullscreen and vertical sync, and set the name other players see. **Play** starts `sticks_game` from the same folder with those choices. The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
+A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), pick the volume, fullscreen and vertical sync, and set the name other players see. **Play** starts `sticks_game` from the same folder with those choices. Settings live only here; the game has no settings screen. The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
 
 ### Playing with friends
 
-On the same network, one player picks **Start Network Game** and the others see **Join Game** on the title screen, as in the original.
+**Start Network Game** opens a room: give it a name, an optional password and a size (2–4 players). While you are in a room, a bar at the top right opens the room panel: who is in it and who is ready, **Copy Invite**, **Ready**, the chat, **Hide** and **Leave**; the host can **Kick** players. The host starts the game from the usual screens once everybody is ready.
 
-Over the internet the connection is peer to peer (no server): the host presses **Send Link** in the lobby, which copies an invitation (`seu2://<game code>/<name>`) to the clipboard. A friend copies that invitation, and their title screen lists the game while it is open. Connections are direct when both routers allow it, and relayed (encrypted end to end) otherwise.
+- **Same network**: the room shows up as **Join Game: name 2/4** on the other players' title screens, as in the original.
+- **Internet**: peer to peer, no server. The host presses **Copy Invite** (or **Send Link**), which copies `seu2://<game code>/<name>`; a friend copies that text and the room appears on their title screen while it is open. Connections are direct when both routers allow it, and relayed (encrypted end to end) otherwise.
+- A room with a password asks for it before joining.
+
+### Sharing a build
+
+```sh
+Package.bat
+```
+
+Builds the release programs and writes `dist\StickEmUp2Rust.zip`: `sticks_launcher.exe`, `sticks_game.exe`, `Setup.bat`, `setup.ps1` and a player README. It contains no game files; every player exports their own copy with `Setup.bat`.
 
 ### Tests
 

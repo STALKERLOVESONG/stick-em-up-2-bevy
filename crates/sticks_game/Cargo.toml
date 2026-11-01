@@ -10,6 +10,7 @@ publish.workspace = true
 bevy = { version = "0.19", features = ["wav"] }
 sticks_net = { path = "../sticks_net" }
 sticks_p2p = { path = "../sticks_p2p" }
+sticks_paper = { path = "../sticks_paper" }
 sticks_sim = { path = "../sticks_sim" }
 unity_compat = { path = "../unity_compat" }
 unity_data = { path = "../unity_data" }

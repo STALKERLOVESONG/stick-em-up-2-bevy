@@ -8,5 +8,5 @@ publish.workspace = true
 [dependencies]
 # The game's Bevy features, so one build compiles Bevy once for both programs.
 bevy = { version = "0.19", features = ["wav"] }
+sticks_paper = { path = "../sticks_paper" }
 sticks_sim = { path = "../sticks_sim" }
-unity_data = { path = "../unity_data" }

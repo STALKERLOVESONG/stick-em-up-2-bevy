@@ -1,14 +1,15 @@
-//! The launcher's look, taken from the game's own Lobby scene: the cardboard behind every Lobby
-//! screen, the title, the torn-paper button backgrounds of the title screen and the font of
-//! their labels (with the shadows the Lobby gives them).
+//! The look, taken from the game's own Lobby scene: the cardboard behind every Lobby screen, the
+//! title, the torn-paper button backgrounds of the title screen and the font of their labels
+//! (with the shadows the Lobby gives them).
 //!
 //! The pieces are drawn flat (unlit 2D meshes): the Lobby's vertex lighting barely changes these
-//! textures, and the launcher has no light to light them with.
+//! textures.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{CompressedImageFormats, ImageAddressMode, ImageFilterMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor, ImageType};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use sticks_sim::draw::{Geometry, apply_texture_transform, sprite_geometry, surface_geometry};
@@ -21,8 +22,9 @@ use unity_data::sprites::SpriteLibrary;
 const LOBBY_SCENE: &str = "Assets/Game/Lobby/Lobby.unity";
 /// The title screen's centre in the Lobby; the launcher's origin.
 const TITLE_SCREEN: [f32; 2] = [-4.5, 0.0];
-/// The title screen's buttons, whose backgrounds the launcher's buttons wear.
-const PAPER_BUTTONS: [&str; 4] = ["Play Offline", "Start Network Game", "Join Network Game", "-1 Exit"];
+/// The title screen's buttons, whose backgrounds the launcher's buttons wear (names without
+/// their ordering prefix, see [`bare`]).
+const PAPER_BUTTONS: [&str; 4] = ["Play Offline", "Start Network Game", "Join Network Game", "Exit"];
 /// The Lobby camera's clear colour.
 pub const CLEAR: [f32; 3] = [0.19215687, 0.3019608, 0.4745098];
 /// `Lobby` `HIGHLIGHTED_TEXT` / `UNAVAILABLE_TEXT`.
@@ -40,8 +42,9 @@ pub struct Piece {
     pub geometry: Geometry,
 }
 
+/// The Lobby's art, loaded once ([`PaperArt::load`]).
 #[derive(Resource)]
-pub struct Art {
+pub struct PaperArt {
     pub background: Option<Piece>,
     pub title: Option<Piece>,
     pub title_shadow: Option<(Vec2, [f32; 4])>,
@@ -53,6 +56,13 @@ pub struct Art {
     /// Text height (scale y) per unit of button height.
     pub text_per_height: f32,
     pub text_shadow: (Vec2, [f32; 4]),
+    /// One material per piece texture.
+    pub text_material: Handle<ColorMaterial>,
+    pub paper_materials: Vec<Handle<ColorMaterial>>,
+    pub background_material: Option<Handle<ColorMaterial>>,
+    pub title_material: Option<Handle<ColorMaterial>>,
+    /// Plain colour (shadows of text-less pieces, dimming).
+    pub white_material: Handle<ColorMaterial>,
 }
 
 fn sampler() -> ImageSampler {
@@ -65,12 +75,41 @@ fn sampler() -> ImageSampler {
     })
 }
 
-fn texture(asset_server: &AssetServer, assets_dir: &Path, path: &Path) -> Handle<Image> {
-    let relative: PathBuf = path.strip_prefix(assets_dir).unwrap_or(path).to_path_buf();
-    asset_server.load_builder().with_settings(|s: &mut ImageLoaderSettings| s.sampler = sampler()).load::<Image>(relative)
+/// Loads each texture once.
+struct Textures<'a> {
+    asset_server: &'a AssetServer,
+    images: &'a mut Assets<Image>,
+    assets_dir: &'a Path,
+    loaded: HashMap<PathBuf, Handle<Image>>,
 }
 
-fn bounds(g: &Geometry) -> (Vec2, Vec2) {
+impl Textures<'_> {
+    fn get(&mut self, path: &Path) -> Handle<Image> {
+        let relative: PathBuf = path.strip_prefix(self.assets_dir).unwrap_or(path).to_path_buf();
+        if let Some(h) = self.loaded.get(&relative) {
+            return h.clone();
+        }
+        let handle = if relative.extension().is_some_and(|e| e == "bytes") {
+            // A `TextAsset` holding PNG bytes (tk2d collections built with `pngTextures`: the
+            // Lobby's atlas, which the title and the font use).
+            let bytes = std::fs::read(self.assets_dir.join(&relative)).unwrap_or_default();
+            match Image::from_buffer(&bytes, ImageType::Extension("png"), CompressedImageFormats::NONE, true, sampler(), RenderAssetUsages::default()) {
+                Ok(image) => self.images.add(image),
+                Err(e) => {
+                    warn!("{}: {e}", relative.display());
+                    Handle::default()
+                }
+            }
+        } else {
+            self.asset_server.load_builder().with_settings(|s: &mut ImageLoaderSettings| s.sampler = sampler()).load::<Image>(relative.clone())
+        };
+        self.loaded.insert(relative, handle.clone());
+        handle
+    }
+}
+
+/// The xy bounds of a piece.
+pub fn bounds(g: &Geometry) -> (Vec2, Vec2) {
     let mut min = Vec2::splat(f32::MAX);
     let mut max = Vec2::splat(f32::MIN);
     for p in &g.positions {
@@ -89,20 +128,34 @@ fn transformed(g: &Geometry, f: impl Fn(Vec2) -> Vec2) -> Geometry {
     out
 }
 
+/// An object name without the number the Lobby's designers put in front to order siblings
+/// ("1 Play Offline", "-1 Exit", "3.1 Show Network Games", "0 Title").
+fn bare(name: &str) -> &str {
+    match name.split_once(' ') {
+        Some((number, rest)) if number.parse::<f32>().is_ok() => rest,
+        _ => name,
+    }
+}
+
 fn name_of(scene: &InteractiveScene, object: Option<usize>) -> &str {
-    object.map_or("", |o| scene.objects[o].name.as_str())
+    object.map_or("", |o| bare(&scene.objects[o].name))
 }
 
 fn parent_name(scene: &InteractiveScene, object: Option<usize>) -> &str {
     name_of(scene, object.and_then(|o| scene.objects[o].parent))
 }
 
-impl Art {
+fn material(materials: &mut Assets<ColorMaterial>, texture: &Handle<Image>) -> Handle<ColorMaterial> {
+    materials.add(ColorMaterial { texture: Some(texture.clone()), ..default() })
+}
+
+impl PaperArt {
     /// Everything from the Lobby scene. `Err` when the scene or its font cannot be read.
-    pub fn load(export_root: &Path, asset_server: &AssetServer) -> Result<Art, String> {
+    pub fn load(export_root: &Path, asset_server: &AssetServer, images: &mut Assets<Image>, materials: &mut Assets<ColorMaterial>) -> Result<PaperArt, String> {
         let assets_dir = export_root.join("Assets");
+        let mut textures = Textures { asset_server, images, assets_dir: &assets_dir, loaded: HashMap::new() };
         let scene = load_interactive_scene(export_root, LOBBY_SCENE).map_err(|e| format!("{LOBBY_SCENE}: {e}"))?;
-        let materials = MaterialLibrary::scan(&assets_dir);
+        let library = MaterialLibrary::scan(&assets_dir);
         let origin = Vec2::from(TITLE_SCREEN);
 
         // Surfaces: the cardboard (the root "Background", under every screen) and the papers.
@@ -111,7 +164,7 @@ impl Art {
         for collider in &scene.colliders {
             let Some(surface) = &collider.surface else { continue };
             let object = scene.object_of(collider.object);
-            let Some(material) = materials.load(&surface.material) else { continue };
+            let Some(material) = library.load(&surface.material) else { continue };
             let Some(path) = material.main_texture.clone() else { continue };
             let mut geometry = surface_geometry(surface, material.color);
             apply_texture_transform(&mut geometry, material.tiling, material.offset);
@@ -120,7 +173,7 @@ impl Art {
             }
             let is_root = object.is_some_and(|o| scene.objects[o].parent.is_none());
             if name_of(&scene, object) == "Background" && is_root {
-                background = Some(Piece { texture: texture(asset_server, &assets_dir, &path), geometry: transformed(&geometry, |p| p - origin) });
+                background = Some(Piece { texture: textures.get(&path), geometry: transformed(&geometry, |p| p - origin) });
                 continue;
             }
             let button = object.and_then(|o| scene.objects[o].parent);
@@ -129,7 +182,7 @@ impl Art {
                 let (min, max) = bounds(&geometry);
                 let (centre, size) = ((min + max) * 0.5, (max - min).max(Vec2::splat(1e-3)));
                 let unit = transformed(&geometry, |p| (p - centre) / size);
-                papers.push((rank, Piece { texture: texture(asset_server, &assets_dir, &path), geometry: unit }, size));
+                papers.push((rank, Piece { texture: textures.get(&path), geometry: unit }, size));
             }
         }
         papers.sort_by_key(|(rank, ..)| *rank);
@@ -142,7 +195,7 @@ impl Art {
             .sprites
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.name == "Title" && s.shadow_of.is_none())
+            .filter(|(_, s)| bare(&s.name) == "Title" && s.shadow_of.is_none())
             .min_by(|(_, a), (_, b)| {
                 let d = |s: &unity_data::sprites::SceneSprite| (Vec2::new(s.world.t[0], s.world.t[1]) - Vec2::new(-4.23, 7.4)).length_squared();
                 d(a).total_cmp(&d(b))
@@ -158,7 +211,7 @@ impl Art {
                         let geometry = sprite_geometry(def, sprite.scale, sprite.color, &world);
                         let (min, max) = bounds(&geometry);
                         let centre = (min + max) * 0.5;
-                        title = Some(Piece { texture: texture(asset_server, &assets_dir, path), geometry: transformed(&geometry, |p| p - centre) });
+                        title = Some(Piece { texture: textures.get(path), geometry: transformed(&geometry, |p| p - centre) });
                     }
                 }
             }
@@ -182,14 +235,30 @@ impl Art {
             .map_or((Vec2::new(0.2, -0.07), [0.0, 0.0, 0.0, 0.5]), |s| (Vec2::new(s.world.t[0] - template.world.t[0], s.world.t[1] - template.world.t[1]), s.color));
         let mut fonts = FontLibrary::new(&assets_dir);
         let font = fonts.get(&template.font).cloned().ok_or("the label font cannot be read")?;
-        let font_texture = font.texture.as_deref().map(|p| texture(asset_server, &assets_dir, p)).ok_or("the label font has no atlas")?;
+        let font_texture = font.texture.as_deref().map(|p| textures.get(p)).ok_or("the label font has no atlas")?;
         let mut text = TextLayout::of(template);
         // Centred, on one line.
         text.anchor = 4;
         text.word_wrap_width = 0;
         text.max_chars = 200;
         let text_per_height = text.scale[1] / first_paper_height;
-        Ok(Art { background, title, title_shadow, papers: papers.into_iter().map(|(_, p, _)| p).collect(), font, font_texture, text, text_per_height, text_shadow })
+        let papers: Vec<Piece> = papers.into_iter().map(|(_, p, _)| p).collect();
+        Ok(PaperArt {
+            text_material: material(materials, &font_texture),
+            paper_materials: papers.iter().map(|p| material(materials, &p.texture)).collect(),
+            background_material: background.as_ref().map(|b| material(materials, &b.texture)),
+            title_material: title.as_ref().map(|t| material(materials, &t.texture)),
+            white_material: materials.add(ColorMaterial::default()),
+            background,
+            title,
+            title_shadow,
+            papers,
+            font,
+            font_texture,
+            text,
+            text_per_height,
+            text_shadow,
+        })
     }
 
     /// The text layout at a scale.
@@ -209,15 +278,24 @@ impl Art {
 
     /// `text` centred on the origin.
     pub fn text_geometry(&self, text: &str, scale: f32, color: [f32; 4]) -> Geometry {
-        let layout = self.layout(scale);
+        self.aligned_text(text, scale, color, false)
+    }
+
+    /// `text` with its lines centred (`left` false) or starting at x = 0 (`left` true),
+    /// vertically centred on the origin.
+    pub fn aligned_text(&self, text: &str, scale: f32, color: [f32; 4], left: bool) -> Geometry {
+        let mut layout = self.layout(scale);
+        if left {
+            layout.anchor = 3;
+        }
         let formatted = format_text(&self.font, &layout, text);
         let g = text_local_geometry(&self.font, &layout, &formatted, color, color, false);
         if g.is_empty() {
             return g;
         }
         let (min, max) = bounds(&g);
-        let centre = (min + max) * 0.5;
-        transformed(&g, |p| p - centre)
+        let shift = if left { Vec2::new(min.x, (min.y + max.y) * 0.5) } else { (min + max) * 0.5 };
+        transformed(&g, |p| p - shift)
     }
 }
 

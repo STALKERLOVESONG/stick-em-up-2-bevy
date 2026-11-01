@@ -6553,6 +6553,7 @@ dependencies = [
  "bevy",
  "sticks_net",
  "sticks_p2p",
+ "sticks_paper",
  "sticks_sim",
  "unity_compat",
  "unity_data",
@@ -6563,8 +6564,8 @@ name = "sticks_launcher"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "sticks_paper",
  "sticks_sim",
- "unity_data",
 ]
 
 [[package]]
@@ -6578,6 +6579,15 @@ dependencies = [
  "iroh",
  "sticks_net",
  "tokio",
+]
+
+[[package]]
+name = "sticks_paper"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "sticks_sim",
+ "unity_data",
 ]
 
 [[package]]

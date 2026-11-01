@@ -43,8 +43,8 @@
 //!
 //! Network games: [`network`] (hosting and joining on the LAN, the server list, slot claims,
 //! shared settings and colours, disconnection errors, the working "Send Link" button) with
-//! `crate::net`. A settings page (not in the original) is reached from the title screen
-//! ([`settings_page`]).
+//! `crate::net`, and the room panel and dialogs above the screens ([`room`], not in the
+//! original). Settings are the launcher's; the game has no settings screen.
 //!
 //! The other screens live in [`screens`]: colour customisation (`CustomizeColor`, with the
 //! posed `Man` models of [`figures`] faded by `ColorModels`), the summary's models and team
@@ -57,8 +57,8 @@
 
 mod figures;
 pub mod network;
+mod room;
 mod screens;
-mod settings_page;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -445,8 +445,6 @@ pub struct Lobby {
     highlighted: Option<usize>,
     /// The network screens' state.
     network: network::NetworkScreens,
-    /// The settings page (not in the original).
-    settings_page: Option<settings_page::SettingsPage>,
 }
 
 /// Draggable cards made from a prototype (`ControlAssignment` / `TeamArrangement`), stacked
@@ -730,9 +728,19 @@ impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(LobbyMemory::loaded())
             .init_resource::<LobbyClicks>()
+            .init_resource::<room::RoomUi>()
+            .add_systems(Startup, room::load_art)
             .add_systems(OnEnter(AppState::Lobby), enter_lobby)
             .add_systems(OnExit(AppState::Lobby), leave_lobby)
-            .add_systems(Update, (lobby_mouse, lobby_update, lobby_camera).chain().run_if(in_state(AppState::Lobby)).before(QueueSet::Light))
+            .add_systems(
+                Update,
+                (room::room_actions, room::room_view, room::room_labels, lobby_mouse, lobby_update, lobby_camera)
+                    .chain()
+                    .run_if(in_state(AppState::Lobby))
+                    .after(sticks_paper::PaperSet)
+                    .before(QueueSet::Light),
+            )
+            .add_systems(OnExit(AppState::Lobby), room::hide)
             .add_systems(Update, queue_lobby.in_set(QueueSet::Collect).run_if(in_state(AppState::Lobby)))
             .add_systems(Update, trivial_fps);
     }
@@ -1013,12 +1021,7 @@ fn enter_lobby(
         player_cards: None,
         highlighted: None,
         network: network::NetworkScreens::default(),
-        settings_page: None,
     };
-    lobby.settings_page = settings_page::build(&mut lobby);
-    if lobby.settings_page.is_none() {
-        warn!("lobby: the settings page could not be built");
-    }
 
     // `GameModeSelect.Start` captions.
     if let Some(s) = lobby.named_script("GameModeSelect").cloned() {
@@ -1108,9 +1111,12 @@ fn lobby_mouse(
     mut pressed: Local<Vec<usize>>,
     mut clicks: ResMut<LobbyClicks>,
     scripted: Res<crate::devscript::ScriptedCursor>,
+    paper: Res<sticks_paper::PaperInput>,
 ) {
     let lobby = &mut *lobby;
-    let ray = scripted.0.or_else(|| windows.single().ok().and_then(|w| w.cursor_position())).and_then(|cursor| {
+    // The room's panel and dialogs take the pointer from the screens below them.
+    let blocked = paper.pointer_captured || lobby.network.dialog.is_some();
+    let ray = scripted.0.or_else(|| windows.single().ok().and_then(|w| w.cursor_position()).filter(|_| !blocked)).and_then(|cursor| {
         let (camera, transform) = cameras.single().ok()?;
         camera.viewport_to_world(transform, cursor).ok()
     });
@@ -1209,10 +1215,14 @@ fn lobby_update(
     mut clicks: ResMut<LobbyClicks>,
     mut pads: ResMut<Gamepads>,
     mut net: ResMut<crate::net::Net>,
+    paper: Res<sticks_paper::PaperInput>,
 ) {
     let dt = time.delta_secs().min(1.0 / 3.0);
     let lobby = &mut *lobby;
     let net = &mut *net;
+    // Typing in the room's chat (or a dialog) is not Lobby input.
+    let keys_free = !paper.keyboard_captured && lobby.network.dialog.is_none();
+    let mouse_free = !paper.pointer_captured && lobby.network.dialog.is_none();
     // Every available `LobbyInput` this frame: `KeyboardAndMouseLobbyInput` (A/D move,
     // Escape is back, any key or mouse button counts as a press; always idle) and
     // `XboxishGamepadLobbyInput` per gamepad.
@@ -1223,10 +1233,10 @@ fn lobby_update(
             InputDevice::KeyboardMouse => Some((
                 d,
                 LobbyMoves {
-                    left: keys.just_pressed(KeyCode::KeyA),
-                    right: keys.just_pressed(KeyCode::KeyD),
-                    back: keys.just_pressed(KeyCode::Escape),
-                    anything_pressed: keys.get_just_pressed().next().is_some() || mouse.get_just_pressed().next().is_some(),
+                    left: keys_free && keys.just_pressed(KeyCode::KeyA),
+                    right: keys_free && keys.just_pressed(KeyCode::KeyD),
+                    back: keys_free && keys.just_pressed(KeyCode::Escape),
+                    anything_pressed: (keys_free && keys.get_just_pressed().next().is_some()) || (mouse_free && mouse.get_just_pressed().next().is_some()),
                     ..LobbyMoves::default()
                 },
             )),
@@ -1413,7 +1423,6 @@ fn lobby_update(
 
     // The other screens, then the presses they simulated (`Button.SimulatePress`).
     screens::update(lobby, &mut memory, &player_moves, mouse_player, model_delta);
-    settings_page::update(lobby, &memory);
     for object in std::mem::take(&mut lobby.screens.simulated) {
         press(lobby, &mut memory, net, object, &mut session, &mut source, &config, &mut next, &mut exit);
     }
@@ -2158,9 +2167,6 @@ fn press(
         }
     }
     screens::press(lobby, object);
-    if settings_page::press(lobby, memory, object) {
-        return;
-    }
     if network::press(lobby, net, object) {
         return;
     }
@@ -2228,6 +2234,13 @@ fn start_game(
     }
     if net.is_client() {
         net.request_load(sticks_net::LoadKind::Normal);
+        return;
+    }
+    // A room starts once everybody in it is ready (not in the original).
+    if net.is_host() && !net.everyone_ready() {
+        let waiting = net.room.as_ref().map(|r| r.waiting_for().join(", ")).unwrap_or_default();
+        net.announce(&format!("Waiting for {waiting} to be ready."));
+        lobby.network.show_room = true;
         return;
     }
     let levels = lobby.levels.levels(memory.mode);
