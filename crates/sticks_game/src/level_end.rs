@@ -15,7 +15,8 @@
 //! * `GameOverUIActivator` (on the Level Ender): once every active player has run out of lives,
 //!   `GameOver()`; disabled again by `DisableGameOvering`.
 //! * `MaximumDamageCalculator`: one frame after `Start`, the starting health of every awake
-//!   `Health` without a `ControlSlot` (the enemies and the enemy helicopters).
+//!   `Health` without a `ControlSlot` and without `DamagingDoesNotAwardScore` (the enemies, the
+//!   enemy helicopters and the breakable props).
 //! * The marker's `PolygonColliderOutlineLines` (white lines with shadows) until it explodes.
 //!
 //! * `DestroyAllEnemiesLevelEnder.countdownLabel` (Office's "Enemies Remaining UI") shows the
@@ -29,7 +30,6 @@
 //!   its colliders overlapping the trigger (`AddOrRemovePlayersControllingAnyPartOf` with the
 //!   vehicle's root).
 //!
-//! TODO: `DamagingDoesNotAwardScore`.
 //! TODO(UNCERTAIN): in a network game only the host sees `TimeLimit`'s finishers (the original
 //! sends them to every machine with an RPC).
 //! TODO(UNCERTAIN): an avatar that is deactivated inside the trigger is taken to send no
@@ -96,6 +96,15 @@ struct EnderState {
     markers: Vec<MarkerState>,
 }
 
+/// Which Enders are active, for scripts on them that act elsewhere (`Dock`).
+#[derive(Resource, Default)]
+pub struct ActiveEnders(pub Vec<FileId>);
+
+fn publish_active_enders(end: Res<LevelEnd>, mut active: ResMut<ActiveEnders>) {
+    active.0.clear();
+    active.0.extend(end.enders.iter().filter(|e| e.activated).filter_map(|e| e.spec.ender.as_ref().map(|x| x.object)));
+}
+
 #[derive(Resource)]
 struct LevelEnd {
     enders: Vec<EnderState>,
@@ -131,11 +140,15 @@ pub struct LevelEndPlugin;
 
 impl Plugin for LevelEndPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::InGame), setup_level_end)
-            .add_systems(OnExit(AppState::InGame), |mut commands: Commands| commands.remove_resource::<LevelEnd>())
+        app.init_resource::<ActiveEnders>()
+            .add_systems(OnEnter(AppState::InGame), setup_level_end)
+            .add_systems(OnExit(AppState::InGame), |mut commands: Commands, mut active: ResMut<ActiveEnders>| {
+                commands.remove_resource::<LevelEnd>();
+                active.0.clear();
+            })
             .add_systems(
                 Update,
-                (level_end_events, helicopter_triggers, tick_marker_explosions).chain().in_set(FrameSet::Characters).after(crate::life::tick_lives).run_if(resource_exists::<LevelEnd>),
+                (level_end_events, helicopter_triggers, tick_marker_explosions, publish_active_enders).chain().in_set(FrameSet::Characters).after(crate::life::tick_lives).run_if(resource_exists::<LevelEnd>),
             )
             .add_systems(
                 Update,
@@ -522,7 +535,23 @@ fn unscaled_level_end(
     if end.maximum_damage.is_none() && end.frames >= 2 {
         let soldiers: f32 = enemies.iter().map(|m| m.health.starting()).sum();
         let helis: f32 = helicopters.iter().filter(|h| h.is_enemy()).map(|h| h.starting_health()).sum();
-        end.maximum_damage = Some(soldiers + helis);
+        // The level's breakable props (Japan's lamps, Office's equipment) are awake `Health`s
+        // without a `ControlSlot` too, with their difficulty-scaled starting health.
+        // TODO(UNCERTAIN): an `ExplodableText`'s letters get their `Health` on
+        // `OnLoadedLevelEverywhere`; whether that is before this count is not recovered (they
+        // are left out).
+        let campaign = session.mode == crate::state::GameMode::Campaign;
+        let props: f32 = level
+            .0
+            .props
+            .iter()
+            .filter(|p| !p.no_score)
+            .map(|p| match (&p.health_scaling, campaign) {
+                (Some(s), true) => sticks_sim::weapons::difficulty_modified(p.starting_health, &s.amount, s.affected_by_player_count, session.player_count as i32, session.difficulty),
+                _ => p.starting_health,
+            })
+            .sum();
+        end.maximum_damage = Some(soldiers + helis + props);
     }
     if let Some(slower) = end.time_slower.as_mut() {
         time_scale.scale = slower.update(time_scale.scale, real.delta_secs());

@@ -696,7 +696,7 @@ pub(crate) fn step_projectiles(
             let (anchor, collided_with) = match hit {
                 Hit::Target(index) if index >= active.len() + helis.len() => {
                     let (car, c) = car_list[index - active.len() - helis.len()];
-                    car_hits.write(crate::cars::CarHit { car, amount });
+                    car_hits.write(crate::cars::CarHit { car, amount, responsible: projectile.responsible });
                     // TODO(UNCERTAIN): the parts of a projectile exploding on a car stay where
                     // it hit instead of riding on the car.
                     let _ = c;
@@ -704,7 +704,7 @@ pub(crate) fn step_projectiles(
                 }
                 Hit::Target(index) if index >= active.len() => {
                     let (heli, h) = helis[index - active.len()];
-                    helicopter_hits.write(crate::helicopter::HelicopterHit { helicopter: heli, amount });
+                    helicopter_hits.write(crate::helicopter::HelicopterHit { helicopter: heli, amount, responsible: projectile.responsible });
                     (AnchorRef::Helicopter(heli), h.anchor())
                 }
                 Hit::Target(index) => {
@@ -715,7 +715,7 @@ pub(crate) fn step_projectiles(
                 // Whatever it touched takes the damage if it has a `Health` (the letters of an
                 // `ExplodableText`).
                 Hit::Level(collider) => {
-                    level_hits.write(crate::letters::LevelColliderHit { collider, amount });
+                    level_hits.write(crate::letters::LevelColliderHit { collider, amount, responsible: projectile.responsible });
                     (AnchorRef::Collider(collider), Anchor::IDENTITY)
                 }
             };
@@ -758,7 +758,7 @@ pub(crate) fn step_swings(
             let amount = swing.swing.damage;
             for key in swing.swing.fixed_step(at, dt, &targets, &collision.rules) {
                 if let Some(&(heli, _)) = helis.iter().find(|(e, _)| e.to_bits() == key) {
-                    helicopter_hits.write(crate::helicopter::HelicopterHit { helicopter: heli, amount });
+                    helicopter_hits.write(crate::helicopter::HelicopterHit { helicopter: heli, amount, responsible: swing.responsible });
                 } else if let Some(&(target, _)) = active.iter().find(|(e, _)| e.to_bits() == key) {
                     damage.write(Damage { target, amount, on_kill: OnKill::Nothing, responsible: swing.responsible });
                 }

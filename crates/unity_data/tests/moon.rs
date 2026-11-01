@@ -178,4 +178,10 @@ fn camera_offsets_changers_and_the_boss_colours() {
     let moon = load_level_for(&root, "Assets/Game/Levels/Moon/Moon.unity", conditions).unwrap();
     assert!(moon.cars.iter().any(|c| c.rocket.is_some() && c.ground_raycast_camera));
     assert!(moon.cars.iter().all(|c| c.rocket.is_some() || !c.ground_raycast_camera));
+    let dock = moon.dock.as_ref().expect("Moon's Ender docks the lunar module");
+    let lunar = moon.cars.iter().find(|c| c.rocket.is_some()).unwrap();
+    assert_eq!(dock.to_dock, lunar.root);
+    eprintln!("dock joints {:?}", dock.joints);
+    assert_eq!(dock.joints.len(), 2);
+    assert!(moon.enders.iter().any(|e| e.ender.as_ref().is_some_and(|x| x.object == dock.ender)), "the Dock sits on a level ender's Ender");
 }

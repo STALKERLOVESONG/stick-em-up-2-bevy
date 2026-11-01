@@ -184,6 +184,21 @@ pub struct Level {
     /// An active `HidePlayerInfo` (the "Complete" ending scene): the HUD's `Player Info` is off
     /// while the level is loaded.
     pub hides_player_info: bool,
+    /// `Dock` on a level's Ender (Moon: the CSM pulls the lunar module in once the level ends).
+    pub dock: Option<Dock>,
+}
+
+/// `Dock`: the `DistanceJoint2D`s of `dockWithJoints` (max-distance-only ropes) are hooked to
+/// `toDock` at `Start` with their current lengths, which then `SmoothDamp` to 0.005 in 1 s.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dock {
+    /// The object whose activation runs `Start` (the Ender).
+    pub ender: FileId,
+    /// The docked body's root object (a `CarSpawn::root`).
+    pub to_dock: FileId,
+    /// Each joint: its anchor in the world (`dockWithJoints` is kinematic) and its
+    /// `connectedAnchor` in the docked root's local space.
+    pub joints: Vec<([f32; 2], [f32; 2])>,
 }
 
 /// What `AllClientControlTypes` reports offline with the keyboard and mouse as the only input
@@ -870,6 +885,25 @@ pub fn extract_level_with(name: &str, scene: &Scene, scripts: &ScriptIndex, cont
             .filter(|go| go.active_in_hierarchy())
             .find_map(|go| mono_fields(go, scripts, "GravityChanger").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).and_then(|b| b.get("gravity")?.as_vec2()).map(|(x, y)| [x, y])),
         hides_player_info: objects.iter().filter(|go| go.active_in_hierarchy()).any(|go| mono_fields(go, scripts, "HidePlayerInfo").is_some_and(|b| b.bool_of("m_Enabled").unwrap_or(true))),
+        dock: objects.iter().find_map(|go| {
+            let b = mono_fields(go, scripts, "Dock").filter(|b| b.bool_of("m_Enabled").unwrap_or(true))?;
+            let body_object = |key: &str| b.get(key).and_then(Value::file_id).and_then(|id| scene.get(id)).and_then(|rb| rb.body.get("m_GameObject")).and_then(Value::file_id).and_then(|g| scene.game_object(g));
+            let (with_joints, to_dock) = (body_object("dockWithJoints")?, body_object("toDock")?);
+            let world = with_joints.world_affine();
+            let joints = with_joints
+                .components()
+                .into_iter()
+                .filter(|c| c.class_id == 232)
+                .map(|j| {
+                    let v = |k: &str| j.body.get(k).and_then(Value::as_vec2).unwrap_or((0.0, 0.0));
+                    let (ax, ay) = v("m_Anchor");
+                    let a = world.transform_point([ax, ay, 0.0]);
+                    let (cx, cy) = v("m_ConnectedAnchor");
+                    ([a[0], a[1]], [cx, cy])
+                })
+                .collect();
+            Some(Dock { ender: go.id(), to_dock: to_dock.id(), joints })
+        }),
     }
 }
 

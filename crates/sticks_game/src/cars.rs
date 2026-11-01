@@ -75,6 +75,7 @@ struct CarSprite {
 pub struct CarHit {
     pub car: Entity,
     pub amount: f32,
+    pub responsible: Option<Entity>,
 }
 
 #[derive(Component)]
@@ -117,6 +118,8 @@ pub struct Car {
     hull: Vec<Vec<SimVec2>>,
     explode_pending: bool,
     explosion: Option<(sticks_sim::explosion::Explosion, sticks_sim::visual::VisualArt)>,
+    /// `Dock`'s ropes once the level's Ender started them (the lunar module at Moon's end).
+    dock: Vec<sticks_sim::car::Rope>,
     /// `RocketControl.engineParticles` (the lunar module's "Emissions").
     exhaust: Option<Exhaust>,
     /// `engineSound.volume`: the scene's, 1 from `SetController`, 0 from `ClearController`
@@ -362,6 +365,7 @@ impl Plugin for CarPlugin {
                     hit_cars.in_set(crate::FrameSet::FixedSteps).after(crate::weapon::step_projectiles),
                     explode_cars.in_set(crate::FrameSet::Characters),
                     operate_car_gunners.in_set(crate::FrameSet::Characters).run_if(in_state(AppState::InGame)),
+                    dock_cars.in_set(crate::FrameSet::Characters).run_if(in_state(AppState::InGame)),
                 ),
             )
             .add_systems(Update, run_exhausts.in_set(crate::FrameSet::Present).before(QueueSet::Collect).run_if(in_state(AppState::InGame)))
@@ -489,6 +493,7 @@ fn spawn_cars(
             explode_pending: false,
             explosion: None,
             engine_volume: spec.engine_sound.as_ref().map_or(0.0, |e| e.volume),
+            dock: Vec::new(),
             exhaust: spec.exhaust.as_ref().map(|(node, fx)| Exhaust { node: *node, spec: fx.clone(), system: sticks_sim::particles::ParticleSystem::play() }),
             spec,
         };
@@ -533,7 +538,15 @@ fn drive_cars(
                     }
                 }
             }
+            // `Dock`'s ropes (`DistanceJoint2D`, max distance only) to the kinematic CSM.
+            // TODO(UNCERTAIN): solved around the contact solver instead of inside its iterations.
+            for rope in &car.dock {
+                rope.solve_velocity(&mut car.bodies[0].body, dt);
+            }
             let touches = step_with_joints(&mut car.bodies, &mut car.joints, &collision.world, rules, dt, rules.velocity_iterations, rules.position_iterations, &mut car.warm);
+            for rope in &car.dock {
+                rope.solve_position(&mut car.bodies[0].body);
+            }
             let n = car.wheels_grounded.len();
             for i in 0..n {
                 car.wheels_grounded[i] = touches.iter().any(|t| matches!(t, Touch::Static { body, .. } if *body == 1 + i));
@@ -599,7 +612,7 @@ pub fn car_obstacles(cars: &Query<&Car>) -> Vec<(StaticCollider, Vec<Vec<SimVec2
 }
 
 /// `Health.Damage` from projectiles (`TellOwnerToExplodeOnHealthExhausted`).
-fn hit_cars(mut hits: MessageReader<CarHit>, mut cars: Query<&mut Car>) {
+fn hit_cars(mut hits: MessageReader<CarHit>, mut cars: Query<&mut Car>, mut scores: Query<(&crate::player::Player, &mut crate::life::PlayerScore)>) {
     for hit in hits.read() {
         let Ok(mut car) = cars.get_mut(hit.car) else { continue };
         if !car.alive() {
@@ -609,8 +622,19 @@ fn hit_cars(mut hits: MessageReader<CarHit>, mut cars: Query<&mut Car>) {
         if !car.spec.explodes {
             continue;
         }
+        let before = car.health.remaining();
         car.health.damage(hit.amount);
-        if !car.alive() {
+        let exhausted = !car.alive();
+        // `DamageOtherOnCollision`: the shooter gets the health taken; destroying a driven car
+        // frags its driver (`ControlSlot.Controller`).
+        let victim = car.driver().and_then(|d| scores.get(d).ok()).map(|(p, _)| p.index);
+        if let Some((_, mut score)) = hit.responsible.and_then(|r| scores.get_mut(r).ok()) {
+            score.0.damage_dealt += before - car.health.remaining();
+            if let (true, Some(victim)) = (exhausted, victim) {
+                score.0.fragged(victim);
+            }
+        }
+        if exhausted {
             info!("{} destroyed", car.spec.name);
             car.explode_pending = true;
         }
@@ -876,5 +900,45 @@ fn run_exhausts(clock: Res<FrameClock>, collision: Res<Collision>, mut rng: ResM
         let Some(ex) = car.exhaust.as_mut() else { continue };
         ex.spec.system.emission.rate = unity_data::particles::MinMaxCurve::constant(rate);
         ex.system.update_oriented(&ex.spec.system, delta, SimVec3::new(w[0], w[1], w[2]), rotation, gravity, &mut rng.0);
+    }
+}
+
+/// `Dock.Start` (when its Ender switches on: the ropes hook onto the docked body at their
+/// current lengths) and `Dock.Update` (each slack rope shortened, then `SmoothDamp`ed to
+/// 0.005 in 1 s).
+fn dock_cars(clock: Res<FrameClock>, level: Res<ActiveLevel>, enders: Res<crate::level_end::ActiveEnders>, mut cars: Query<&mut Car>) {
+    let Some(dock) = &level.0.dock else { return };
+    if !enders.0.contains(&dock.ender) {
+        return;
+    }
+    let delta = clock.stepper.frame().delta;
+    for mut car in &mut cars {
+        if car.spec.root != dock.to_dock || !car.alive() {
+            continue;
+        }
+        let car = &mut *car;
+        if car.dock.is_empty() {
+            let body = car.bodies[0].body;
+            car.dock = dock
+                .joints
+                .iter()
+                .map(|(anchor, local)| {
+                    let mut rope = sticks_sim::car::Rope {
+                        anchor: SimVec2::new(anchor[0], anchor[1]),
+                        local_anchor: SimVec2::new(local[0] * car.root_scale[0], local[1] * car.root_scale[1]),
+                        length: 0.0,
+                        length_velocity: 0.0,
+                    };
+                    rope.length = rope.current_length(&body);
+                    rope
+                })
+                .collect();
+            info!("{} docking", car.spec.name);
+            continue;
+        }
+        let body = car.bodies[0].body;
+        for rope in &mut car.dock {
+            rope.tighten(&body, delta);
+        }
     }
 }

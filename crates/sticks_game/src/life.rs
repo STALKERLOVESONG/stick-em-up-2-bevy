@@ -212,7 +212,6 @@ pub(crate) fn apply_damage(
         }
         // `DamageOtherOnCollision`: the shooter is credited with the health the hit took away and
         // with a frag when it finished its victim off.
-        // TODO: `DamagingDoesNotAwardScore` (no prefab recovered so far carries it).
         if let Some(shooter) = request.responsible {
             let victim_index = controller.and_then(|c| slots.get(c).ok()).map(|(player, _, _)| player.index);
             if let Ok((_, _, mut score)) = slots.get_mut(shooter) {

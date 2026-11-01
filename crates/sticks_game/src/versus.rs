@@ -149,7 +149,7 @@ fn versus_late_update(
             let Some((avatar, _, mortal, piloting)) = avatars.iter().find(|(_, c, _, _)| c.0 == *slot) else { continue };
             match piloting {
                 Some(piloting) => {
-                    helicopter_hits.write(HelicopterHit { helicopter: piloting.vehicle, amount: f32::MAX });
+                    helicopter_hits.write(HelicopterHit { helicopter: piloting.vehicle, amount: f32::MAX, responsible: None });
                 }
                 None if mortal.avatar_active() => {
                     damage.write(Damage { target: avatar, amount: f32::MAX, on_kill: OnKill::Nothing, responsible: None });

@@ -7,6 +7,7 @@ use unity_compat::{Vec2, mathf};
 use unity_data::vehicles::CarTuning;
 
 use crate::contact::DynamicBody;
+use crate::rigid_body::RigidBody;
 
 /// `CarControl.SignOrZero`.
 fn sign_or_zero(f: f32) -> f32 {
@@ -255,5 +256,113 @@ mod tests {
             drive.fixed_update(&mut body, Vec2::new(0.0, -2.86), Some((0.0, 1.0)), 0.02);
         }
         assert!((body.angular_velocity_degrees() + 60.0).abs() < 1e-3);
+    }
+}
+
+/// A `DistanceJoint2D` with `maxDistanceOnly` (Box2D's rope joint) from a kinematic body's
+/// world point to a point of a dynamic body (`Dock`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rope {
+    /// The kinematic end, in the world.
+    pub anchor: Vec2,
+    /// The dynamic end, in the body's frame (relative to its origin, scaled as the hull).
+    pub local_anchor: Vec2,
+    /// `DistanceJoint2D.distance` (the rope's maximum length).
+    pub length: f32,
+    /// `Dock`'s `SmoothDamp` velocity of the length.
+    pub length_velocity: f32,
+}
+
+impl Rope {
+    fn arm(&self, body: &RigidBody) -> (Vec2, Vec2, Vec2) {
+        let (s, c) = body.angle.sin_cos();
+        let local = self.local_anchor - body.local_center;
+        let r = Vec2::new(c * local.x - s * local.y, s * local.x + c * local.y);
+        let center = body.world_center();
+        (r, center + r, center)
+    }
+
+    /// The distance between the two ends now.
+    pub fn current_length(&self, body: &RigidBody) -> f32 {
+        let (_, p, _) = self.arm(body);
+        (p - self.anchor).magnitude()
+    }
+
+    /// `b2RopeJoint::SolveVelocityConstraints` against a static end: the speed along the rope
+    /// may not stretch it (a slack rope may close at most its slack this step).
+    pub fn solve_velocity(&self, body: &mut RigidBody, dt: f32) {
+        let (r, p, _) = self.arm(body);
+        let d = p - self.anchor;
+        let length = d.magnitude();
+        if length <= 0.005 {
+            return;
+        }
+        let u = d * (1.0 / length);
+        let c = length - self.length;
+        let cr = r.x * u.y - r.y * u.x;
+        let inv = body.inv_mass + body.inv_inertia * cr * cr;
+        if inv <= 0.0 {
+            return;
+        }
+        let vp = body.linear_velocity + Vec2::new(-body.angular_velocity * r.y, body.angular_velocity * r.x);
+        let mut cdot = u.dot(vp);
+        if c < 0.0 {
+            cdot += c / dt;
+        }
+        let impulse = (-cdot / inv).min(0.0);
+        body.linear_velocity = body.linear_velocity + u * (body.inv_mass * impulse);
+        body.angular_velocity += body.inv_inertia * cr * impulse;
+    }
+
+    /// `b2RopeJoint::SolvePositionConstraints`: pull a stretched rope back (at most 0.2 a step).
+    pub fn solve_position(&self, body: &mut RigidBody) {
+        let (r, p, _) = self.arm(body);
+        let d = p - self.anchor;
+        let length = d.magnitude();
+        if length <= 0.005 {
+            return;
+        }
+        let u = d * (1.0 / length);
+        let c = (length - self.length).clamp(0.0, 0.2);
+        let cr = r.x * u.y - r.y * u.x;
+        let inv = body.inv_mass + body.inv_inertia * cr * cr;
+        if inv <= 0.0 || c == 0.0 {
+            return;
+        }
+        let impulse = -c / inv;
+        body.position = body.position + u * (body.inv_mass * impulse);
+        body.angle += body.inv_inertia * cr * impulse;
+    }
+
+    /// `Dock.Update`: a rope that has gone slack is shortened to the current distance, then the
+    /// length `SmoothDamp`s to 0.005 over 1 s.
+    pub fn tighten(&mut self, body: &RigidBody, delta: f32) {
+        let now = self.current_length(body);
+        if now < self.length {
+            self.length = now;
+        }
+        self.length = mathf::smooth_damp(self.length, 0.005, &mut self.length_velocity, 1.0, f32::INFINITY, delta);
+    }
+}
+
+#[cfg(test)]
+mod rope_tests {
+    use super::*;
+
+    #[test]
+    fn a_tightening_rope_pulls_the_body_up_to_the_anchor() {
+        let mut body = RigidBody::new(Vec2::new(0.0, 0.0), 0.0, 10.0, 0.0, 0.05, 1.0);
+        let mut rope = Rope { anchor: Vec2::new(0.0, 6.0), local_anchor: Vec2::new(0.0, 1.0), length: 0.0, length_velocity: 0.0 };
+        rope.length = rope.current_length(&body);
+        let dt = 0.02;
+        for _ in 0..300 {
+            rope.tighten(&body, dt);
+            body.integrate_velocities(dt, Vec2::new(0.0, -8.0));
+            rope.solve_velocity(&mut body, dt);
+            body.position = body.position + body.linear_velocity * dt;
+            rope.solve_position(&mut body);
+        }
+        assert!(rope.length < 0.05, "{}", rope.length);
+        assert!(rope.current_length(&body) < 0.3, "{:?}", body.position);
     }
 }

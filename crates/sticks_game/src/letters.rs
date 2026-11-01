@@ -34,6 +34,8 @@ const TEXT_SHADOW_DEPTH: f32 = 0.025;
 pub struct LevelColliderHit {
     pub collider: u32,
     pub amount: f32,
+    /// `DamageOtherOnCollision.responsiblePlayer` (the player slot credited with the damage).
+    pub responsible: Option<Entity>,
 }
 
 enum LetterState {

@@ -215,6 +215,9 @@ pub struct LevelProp {
     pub destroy_on_finished: bool,
     /// `DestroyAllForGoal`: destroying every such prop alone gives "<level> all destroyed".
     pub destroy_all_for_goal: bool,
+    /// `DamagingDoesNotAwardScore`: hits on it credit nobody, and it is left out of
+    /// `MaximumDamageCalculator`.
+    pub no_score: bool,
     /// `SetLayerInCampaignMode.layer`.
     pub campaign_layer: Option<u8>,
 }
@@ -324,6 +327,7 @@ pub fn props(scene: &Scene, scripts: &ScriptIndex, colliders: &[Collider], sprit
             fade_wait_time: mono(&go, scripts, "ExplodeSpritesAndLines").map(|m| m.body.f32_of("fadeWaitTime").unwrap_or(2.0)),
             destroy_on_finished: mono(&go, scripts, "DestroyOnExplosionFinished").is_some(),
             destroy_all_for_goal: mono(&go, scripts, "DestroyAllForGoal").is_some(),
+            no_score: mono(&go, scripts, "DamagingDoesNotAwardScore").is_some(),
             campaign_layer: mono(&go, scripts, "SetLayerInCampaignMode").and_then(|m| m.body.i64_of("layer")).map(|l| l as u8),
         });
     }

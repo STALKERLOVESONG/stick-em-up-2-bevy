@@ -2313,6 +2313,23 @@ fn lobby_camera(
         influencers.push(s.object);
     }
     let aspect = windows.single().map_or(16.0 / 9.0, |w| w.width() / w.height());
+    // `BigScreenCameraDistancer.Update` (on the Lobby camera): on a big screen the framing keeps
+    // at least `33.5` units of height, blending from the width-derived height between a 10" and
+    // a 21.5" window diagonal (`Utility.GetWindowDiagonalInches`; `OverscanSafetyNeeded` is
+    // false on the desktop).
+    // TODO(UNCERTAIN): `Screen.dpi` on Windows taken as 96 × the window's scale factor (as in
+    // `hud::layout_hud`).
+    if let Ok(window) = windows.single() {
+        let (w, h) = (window.physical_width() as f32, window.physical_height() as f32);
+        let inches = (w * w + h * h).sqrt() / (96.0 * window.scale_factor());
+        let fraction = ((inches - 10.0) / 11.5).clamp(0.0, 1.0);
+        rig.settings.minimum_on_screen_height = if fraction <= 0.0 {
+            0.0
+        } else {
+            let from_width = rig.settings.minimum_on_screen_width / 1.777_777_8;
+            (33.5 - from_width) * fraction + from_width
+        };
+    }
     rig.late_update(aspect, time.delta_secs().min(1.0 / 3.0));
     // Diagnostics for the framing (logged about a second after the influencers change).
     let frames = match logged.as_mut() {

@@ -73,6 +73,8 @@ struct HeliSprite {
     color: [f32; 4],
     texture: u32,
     shadow: Option<(SpriteDef, u32, f32)>,
+    /// The gun this sprite belongs to (its `HelicopterGunnerColor` rocket launcher).
+    gun: Option<usize>,
 }
 
 /// One gun: launcher, its current world angle, whether it is switched on.
@@ -469,6 +471,8 @@ impl Helicopter {
 pub struct HelicopterHit {
     pub helicopter: Entity,
     pub amount: f32,
+    /// The player slot credited with the damage (`DamageOtherOnCollision.responsiblePlayer`).
+    pub responsible: Option<Entity>,
 }
 
 pub struct HelicopterPlugin;
@@ -570,7 +574,7 @@ fn spawn_helicopters(
             // `HelicopterColorSetter` / `HelicopterGunnerColor`: the fuselage and the guns take
             // the body colour (enemies); `HelicopterColor` paints an uncontrolled fuselage white.
             let mut color = sprite.color;
-            let in_gun = spec.guns.iter().any(|g| {
+            let gun = spec.guns.iter().position(|g| {
                 let mut current = Some(node);
                 while let Some(c) = current {
                     if c == g.node {
@@ -580,10 +584,11 @@ fn spawn_helicopters(
                 }
                 false
             });
+            let in_gun = gun.is_some();
             if in_gun || Some(node) == spec.fuselage {
                 color = body_color.unwrap_or([1.0; 4]);
             }
-            sprites.push(HeliSprite { node, def: def.clone(), tiled: sprite.tiled, scale: sprite.scale, color, texture, shadow });
+            sprites.push(HeliSprite { node, def: def.clone(), tiled: sprite.tiled, scale: sprite.scale, color, texture, shadow, gun });
         }
         let guns = spec
             .guns
@@ -755,7 +760,12 @@ fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopte
 
 /// `Health.Damage` from projectiles; `HelicopterColor` flashes the fuselage; an exhausted hull
 /// explodes (`explode_helicopters`).
-fn hit_helicopters(mut hits: MessageReader<HelicopterHit>, mut helicopters: Query<(&mut Helicopter, Option<&crate::net::NetObject>)>, mut net: ResMut<crate::net::Net>) {
+fn hit_helicopters(
+    mut hits: MessageReader<HelicopterHit>,
+    mut helicopters: Query<(&mut Helicopter, Option<&crate::net::NetObject>)>,
+    mut net: ResMut<crate::net::Net>,
+    mut scores: Query<(&crate::player::Player, &mut crate::life::PlayerScore)>,
+) {
     // In a network game only the host's hits count; the others take the host's health.
     if net.is_client() {
         hits.clear();
@@ -774,7 +784,17 @@ fn hit_helicopters(mut hits: MessageReader<HelicopterHit>, mut helicopters: Quer
         if !h.alive() {
             continue;
         }
+        let before = h.health.remaining();
         h.health.damage(hit.amount);
+        // `DamageOtherOnCollision`: the shooter gets the health taken; destroying a flown
+        // helicopter frags its pilot.
+        let victim = h.pilot().and_then(|p| scores.get(p).ok()).map(|(p, _)| p.index);
+        if let Some((_, mut score)) = hit.responsible.and_then(|r| scores.get_mut(r).ok()) {
+            score.0.damage_dealt += before - h.health.remaining();
+            if let (false, Some(victim)) = (h.alive(), victim) {
+                score.0.fragged(victim);
+            }
+        }
         if h.alive() {
             h.flash = 0.1;
         } else {
@@ -1118,6 +1138,17 @@ fn queue_helicopters(
             }
             let world = h.node_world(s.node, &root);
             let mut color = s.color;
+            // `HelicopterGunnerColor.SetController` / `ClearController`: a gunner seat's rocket
+            // launcher in its gunner's body colour, white while the seat is free.
+            if let Some(g) = s.gun.filter(|&g| h.guns[g].seat.is_some()) {
+                color = match h.gunner(g) {
+                    Some(gunner) => {
+                        let body = pilots.iter().find(|(p, c, _)| p.vehicle == entity && c.0 == gunner).and_then(|(_, _, p)| p.map(|p| p.0.body)).unwrap_or_else(|| art.body_color());
+                        [f32::from(body[0]) / 255.0, f32::from(body[1]) / 255.0, f32::from(body[2]) / 255.0, f32::from(body[3]) / 255.0]
+                    }
+                    None => [1.0; 4],
+                };
+            }
             if Some(s.node) == h.spec.fuselage {
                 color = h.fuselage_color;
                 if h.flash > 0.0 {

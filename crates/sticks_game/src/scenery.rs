@@ -358,11 +358,20 @@ fn hit_props(
     mut sounds: MessageWriter<PlaySound>,
     mut memory: ResMut<crate::lobby::LobbyMemory>,
     players: Query<&crate::player::Player>,
+    mut scores: Query<&mut crate::life::PlayerScore>,
 ) {
     let props = &mut *props;
     for hit in hits.read() {
         let Some(prop) = props.items.iter_mut().find(|p| matches!(p.phase, PropPhase::Alive) && level.0.props[p.spec].colliders.contains(&(hit.collider as usize))) else { continue };
+        let before = prop.health.remaining();
         let events = prop.health.damage(hit.amount);
+        // `DamageOtherOnCollision`: the shooter is credited with the health it took (props
+        // carry no `ControlSlot`, so no frag), unless `DamagingDoesNotAwardScore`.
+        if !level.0.props[prop.spec].no_score {
+            if let Some(mut score) = hit.responsible.and_then(|r| scores.get_mut(r).ok()) {
+                score.0.damage_dealt += before - prop.health.remaining();
+            }
+        }
         if !(&events).into_iter().any(|e| matches!(e, HealthEvent::Exhausted)) {
             continue;
         }

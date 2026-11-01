@@ -383,17 +383,20 @@ fn queue_figures(
     mut commands: Commands,
     art: Option<Res<ManArt>>,
     light: Res<SceneLight>,
-    mut avatars: Query<(Entity, &Posed, &Armament, &Mortal, Option<&HitFlash>, Option<&Palette>, Option<&mut LastVisual>)>,
+    mut avatars: Query<(Entity, &Posed, &Armament, &Mortal, Option<&HitFlash>, Option<&Palette>, Option<&mut LastVisual>, Has<ColorCycler>)>,
     mut queue: ResMut<FrameQueue>,
 ) {
     let Some(art) = art else { return };
     let model = &art.model;
-    for (entity, posed, armament, mortal, flash, palette, last) in &mut avatars {
+    for (entity, posed, armament, mortal, flash, palette, last, cycling) in &mut avatars {
         if !mortal.avatar_active() {
             continue;
         }
         let palette = palette.map_or(art.palette, |p| p.0);
-        let palette = if flash.is_some_and(|f| f.flashing) { palette.hit_version() } else { palette };
+        // `ColorCycler.Update` rewrites `CharacterColor` every frame after
+        // `FlashCharacterOnDamage` set the hit colours, so a cycling character shows its own
+        // half-brightness hit colour instead of the flash.
+        let palette = if flash.is_some_and(|f| f.flashing) && !cycling { palette.hit_version() } else { palette };
         let equipped = armament.equipped();
         let visual = model.visual(&posed.solved, &posed.placement, &palette, light.for_shadows, &|bone| model.active_with_weapon(bone, equipped));
         for (texture, geometry) in visual.renderers_textured(&art.art) {

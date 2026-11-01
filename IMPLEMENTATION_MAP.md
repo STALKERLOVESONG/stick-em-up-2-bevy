@@ -275,7 +275,26 @@ From the scripts the user supplied (missing from the decompiled source):
   `Tile(Clone)` copies); `LocallyDeactivateOffscreen` (Treetops' background tiles, radius 50)
   and `DetachChildWhenDisabled` only cull what is off screen, which the renderer's view test
   already does: nothing observable to port.
-Still missing per level (script inventory): Moon's `Dock`.
+From `assets_raw/Scripts` (771 game scripts; the decompiled `source/` has 313): every script a
+level, the Lobby or the Permanent System uses was compared with the reconstruction. Checked as
+already matching: `PolygonColliderRenderer` (+ `Shadower` / `ShadowPositioner`), `FakeParallax`,
+`ScaleSpriteWithCameraDistance`, `MaximumDifficultyLevelComponents` (the `AimVisualizer` up to
+difficulty 0, players' and enemies'). Newly ported:
+* `Dock` (Moon's Ender): the CSM's two max-distance `DistanceJoint2D`s hook onto the lunar
+  module at their current lengths and `SmoothDamp` to 0.005 in 1 s, pulling it in to dock
+  (rope joints solved around the contact solver, TODO(UNCERTAIN)).
+* `DamagingDoesNotAwardScore` (Moon's "Surveyor") and `DamageOtherOnCollision`'s credit for
+  non-character targets: hits on enemy helicopters, cars and breakable props now add to the
+  shooter's damage dealt (a destroyed flown helicopter / driven car frags its pilot / driver);
+  `MaximumDamageCalculator` also counts the breakable props' (difficulty-scaled) health. Before,
+  Skyline's helicopters and the props counted towards the maximum but never towards the score.
+* `HelicopterGunnerColor`: a gunner seat's rocket launcher in its gunner's body colour, white
+  while free. `ColorCycler` + `FlashCharacterOnDamage`: the boss shows the cycler's hit colour,
+  not the flash.
+* `BigScreenCameraDistancer` (Lobby camera): minimum framed height from the window's diagonal.
+Not needed: `AspectIndependentViewportAnchor` (touch controls only), `UnhideOnExplosionFinished`
+(editor hide flags), `DisableCollisionsFromBelow` (3D mesh colliders, unused), the InControl /
+Steam Controller / touch input and tk2d editor scripts.
 Reference screenshots of the original (Pirates, Moon, Skyline, Japan, Lobby) are in
 `HD GAME SCREENSHOTS/` next to `HD GAME REF/`.
 
@@ -284,7 +303,7 @@ Reference screenshots of the original (Pirates, Moon, Skyline, Japan, Lobby) are
 - HUD: control prompts other than "Enter Vehicle".
 - Lobby: touch input; `RemoteLevelAvailability` (levels another machine has unlocked); original Level Loading scene; achievement triggers outside level end (`four frag shot`, `0 shot perfect health …`).
 - Level flow: server/client menus; `TimeLimit` finishers are host-only in a network game.
-- Vehicles: the lunar module's `Dock`; `VehicleOccupantIK`'s head look-at on gunners; cars (`CarControl`, `WheelJoint2D`), rockets (`RocketControl`), cannons (`CannonControl`) — the contact solver exists now; cars still need Box2D's wheel joint; the "Enter Vehicle" control prompt.
+- Vehicles: `VehicleOccupantIK`'s head look-at on gunners; cars (`CarControl`, `WheelJoint2D`), rockets (`RocketControl`), cannons (`CannonControl`) — the contact solver exists now; cars still need Box2D's wheel joint; the "Enter Vehicle" control prompt.
 - Weapons: verify Shuriken, Pistol and Spear end to end in Japan / Pirates / Treetops.
 - Enemies: cannons; moving platforms.
 - Audio: stereo panning.
