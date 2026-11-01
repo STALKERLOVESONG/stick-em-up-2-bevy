@@ -107,7 +107,8 @@ impl Plugin for PaperPlugin {
         app.add_message::<PaperClicked>()
             .add_message::<PaperSubmitted>()
             .init_resource::<PaperInput>()
-            .add_systems(Update, (pointer, typing, field_labels, refresh_labels).chain().in_set(PaperSet));
+            .init_resource::<Paste>()
+            .add_systems(Update, (pointer, typing, pasting, field_labels, refresh_labels).chain().in_set(PaperSet));
     }
 }
 
@@ -213,6 +214,14 @@ impl Spawner<'_, '_, '_> {
     pub fn panel(&mut self, parent: Option<Entity>, at: Vec3, size: Vec2, which: usize) -> Entity {
         let node = self.paper(parent, at, size, which);
         self.commands.entity(node).insert(PaperBlocker { size });
+        node
+    }
+
+    /// A flat coloured rectangle (icon parts); it does not take the pointer.
+    pub fn rect(&mut self, parent: Option<Entity>, at: Vec3, size: Vec2, color: [f32; 4]) -> Entity {
+        let node = self.node(parent, at);
+        let material = self.art.white_material.clone();
+        self.piece(node, &rectangle(size, color), material, Vec3::ZERO);
         node
     }
 
@@ -329,12 +338,82 @@ fn pointer(
 }
 
 /// Typing into the focused field.
-fn typing(mut keys: MessageReader<KeyboardInput>, mut fields: Query<(Entity, &mut PaperField)>, mut submitted: MessageWriter<PaperSubmitted>, mut input: ResMut<PaperInput>) {
+/// A clipboard read for Ctrl+V (reading takes a moment, so it runs on a helper thread) and the
+/// field it goes into.
+#[derive(Resource, Default)]
+struct Paste(Option<(Entity, std::sync::Mutex<std::sync::mpsc::Receiver<Option<String>>>)>);
+
+/// The clipboard's text, read with the platform's own tool.
+pub fn read_clipboard() -> std::sync::mpsc::Receiver<Option<String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let tools: &[(&str, &[&str])] = if cfg!(windows) {
+            &[("powershell", &["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"])]
+        } else if cfg!(target_os = "macos") {
+            &[("pbpaste", &[])]
+        } else {
+            &[("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])]
+        };
+        let mut out = None;
+        for (tool, args) in tools {
+            let mut command = std::process::Command::new(tool);
+            command.args(*args);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            if let Ok(o) = command.output() {
+                if o.status.success() {
+                    out = Some(String::from_utf8_lossy(&o.stdout).trim().to_owned());
+                    break;
+                }
+            }
+        }
+        let _ = tx.send(out);
+    });
+    rx
+}
+
+/// Ctrl+V's text lands in the field once the clipboard has been read.
+fn pasting(mut paste: ResMut<Paste>, mut fields: Query<&mut PaperField>) {
+    let Some((entity, rx)) = &paste.0 else { return };
+    let Ok(result) = rx.lock().map(|rx| rx.try_recv()) else { return };
+    let text = match result {
+        Ok(text) => text,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+    };
+    if let (Some(text), Ok(mut field)) = (text, fields.get_mut(*entity)) {
+        for c in text.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|c| !c.is_control()) {
+            if field.text.chars().count() < field.max {
+                field.text.push(c);
+            }
+        }
+    }
+    paste.0 = None;
+}
+
+fn typing(
+    mut keys: MessageReader<KeyboardInput>,
+    held: Res<ButtonInput<KeyCode>>,
+    mut fields: Query<(Entity, &mut PaperField)>,
+    mut submitted: MessageWriter<PaperSubmitted>,
+    mut input: ResMut<PaperInput>,
+    mut paste: ResMut<Paste>,
+) {
+    let ctrl = held.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::SuperLeft, KeyCode::SuperRight]);
     for key in keys.read() {
         if key.state != ButtonState::Pressed {
             continue;
         }
         let Some((entity, mut field)) = fields.iter_mut().find(|(_, f)| f.focused) else { continue };
+        if ctrl {
+            if key.key_code == KeyCode::KeyV && paste.0.is_none() {
+                paste.0 = Some((entity, std::sync::Mutex::new(read_clipboard())));
+            }
+            continue;
+        }
         match &key.logical_key {
             Key::Character(s) => {
                 for c in s.chars().filter(|c| !c.is_control()) {

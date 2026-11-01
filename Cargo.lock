@@ -2831,6 +2831,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "exe_icon"
+version = "0.1.0"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6551,6 +6555,7 @@ name = "sticks_game"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "exe_icon",
  "sticks_net",
  "sticks_p2p",
  "sticks_paper",
@@ -6564,6 +6569,7 @@ name = "sticks_launcher"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "exe_icon",
  "sticks_paper",
  "sticks_sim",
 ]

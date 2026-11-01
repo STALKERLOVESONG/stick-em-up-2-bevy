@@ -18,9 +18,20 @@
 //!   `Health` without a `ControlSlot` (the enemies and the enemy helicopters).
 //! * The marker's `PolygonColliderOutlineLines` (white lines with shadows) until it explodes.
 //!
-//! TODO: `TimeLimit` and the "Timing UI" (Moon Race), the "Enemies Remaining UI" countdown text
-//! (a level text on the UI layer, Office), `TriggeredByAllPlayers` for players inside a
-//! helicopter (the hull's colliders entering the trigger), `DamagingDoesNotAwardScore`.
+//! * `DestroyAllEnemiesLevelEnder.countdownLabel` (Office's "Enemies Remaining UI") shows the
+//!   enemies left.
+//! * `TimeLimit` (Moon Race): the "Timing UI" countdown runs from `timeLimit` once the level is
+//!   loaded; at zero the finish trigger turns off and the game is over. Each player reaching the
+//!   finish trigger gets the next "Finishers" line (label in the player's body colour, the time
+//!   left) and applause; the countdown hides when the level is complete.
+//!
+//! * `TriggeredByAllPlayers` also counts a player flying a helicopter or driving a car: any of
+//!   its colliders overlapping the trigger (`AddOrRemovePlayersControllingAnyPartOf` with the
+//!   vehicle's root).
+//!
+//! TODO: `DamagingDoesNotAwardScore`.
+//! TODO(UNCERTAIN): in a network game only the host sees `TimeLimit`'s finishers (the original
+//! sends them to every machine with an RPC).
 //! TODO(UNCERTAIN): an avatar that is deactivated inside the trigger is taken to send no
 //! `OnTriggerExit2D` (it stays counted as inside).
 
@@ -74,6 +85,8 @@ struct EnderState {
     triggers: Vec<(FileId, AllPlayersTrigger)>,
     /// `DestroyAllEnemiesLevelEnder`.
     count: Option<EnemyCount>,
+    /// `DestroyAllEnemiesLevelEnder.countdownLabel` (a level UI object).
+    countdown_label: Option<FileId>,
     /// `DestroyParticularEnemyLevelEnder.enemy`.
     particular: Option<FileId>,
     /// The Ender is active.
@@ -97,6 +110,21 @@ struct LevelEnd {
     /// `MaximumDamageCalculator.MaximumDamage` (computed on the second frame).
     maximum_damage: Option<f32>,
     frames: u32,
+    /// `TimeLimit`, if the level has one.
+    time_limit: Option<TimeLimitState>,
+}
+
+/// `TimeLimit`'s run-time state.
+struct TimeLimitState {
+    /// The object with the finish trigger.
+    object: FileId,
+    time_left: f32,
+    expired: bool,
+    completed: bool,
+    /// `completedPlayers` (player indices).
+    finished: Vec<usize>,
+    /// Finishes not shown yet: the avatar and its time.
+    to_show: Vec<(Entity, f32)>,
 }
 
 pub struct LevelEndPlugin;
@@ -107,7 +135,7 @@ impl Plugin for LevelEndPlugin {
             .add_systems(OnExit(AppState::InGame), |mut commands: Commands| commands.remove_resource::<LevelEnd>())
             .add_systems(
                 Update,
-                (level_end_events, tick_marker_explosions).chain().in_set(FrameSet::Characters).after(crate::life::tick_lives).run_if(resource_exists::<LevelEnd>),
+                (level_end_events, helicopter_triggers, tick_marker_explosions).chain().in_set(FrameSet::Characters).after(crate::life::tick_lives).run_if(resource_exists::<LevelEnd>),
             )
             .add_systems(
                 Update,
@@ -131,12 +159,14 @@ fn setup_level_end(mut commands: Commands, level: Res<ActiveLevel>, clock: Res<F
         .map(|spec| {
             let mut triggers = Vec::new();
             let mut count = None;
+            let mut countdown_label = None;
             let mut particular = None;
             for activator in &spec.activators {
                 match activator {
                     EnderActivator::AllPlayersTrigger { trigger: Some(t) } => triggers.push((*t, AllPlayersTrigger::default())),
                     EnderActivator::AllPlayersTrigger { trigger: None } => {}
-                    EnderActivator::DestroyAllEnemies { .. } => {
+                    EnderActivator::DestroyAllEnemies { countdown_label: label } => {
+                        countdown_label = *label;
                         // `Awake` subscribes before any `EnemyRegistrar.Start` announces itself.
                         let mut c = EnemyCount::default();
                         for _ in 0..registered {
@@ -150,6 +180,7 @@ fn setup_level_end(mut commands: Commands, level: Res<ActiveLevel>, clock: Res<F
             EnderState {
                 triggers,
                 count,
+                countdown_label,
                 particular,
                 activated: false,
                 game_over_enabled: spec.game_over_activator,
@@ -163,7 +194,11 @@ fn setup_level_end(mut commands: Commands, level: Res<ActiveLevel>, clock: Res<F
     } else {
         info!("level {}: {} level ender(s), {} registered enemies", level.0.name, enders.len(), registered);
     }
-    commands.insert_resource(LevelEnd { enders, start_time: clock.time, level_time: None, time_slower: None, ui_wait: None, maximum_damage: None, frames: 0 });
+    let time_limit = level.0.time_limit.map(|(object, seconds)| {
+        info!("level {}: time limit {seconds} s", level.0.name);
+        TimeLimitState { object, time_left: seconds, expired: false, completed: false, finished: Vec::new(), to_show: Vec::new() }
+    });
+    commands.insert_resource(LevelEnd { enders, start_time: clock.time, level_time: None, time_slower: None, ui_wait: None, maximum_damage: None, frames: 0, time_limit });
 }
 
 /// The player index controlling an avatar.
@@ -210,6 +245,14 @@ fn level_end_events(
     let trigger_object = |collider: u32| level.0.colliders.get(collider as usize).filter(|c| c.trigger).map(|c| c.object);
     for e in entered.read() {
         let (Some(object), Some(player)) = (trigger_object(e.collider), player_of(e.avatar, &controlled, &players)) else { continue };
+        // `TimeLimit.OnTriggerEnter2D` (offline or on the host; its trigger is off once expired).
+        if let Some(limit) = end.time_limit.as_mut() {
+            if limit.object == object && decides && !limit.expired && !limit.finished.contains(&player) {
+                limit.finished.push(player);
+                limit.to_show.push((e.avatar, limit.time_left));
+                sounds.write(PlaySound { group: "Applause".to_owned(), at: None, owner: None });
+            }
+        }
         for ender in &mut end.enders {
             for (t, trigger) in &mut ender.triggers {
                 if *t == object {
@@ -264,6 +307,91 @@ fn level_end_events(
             net.send_level_event("LevelEnder", i as u64, Vec::new());
             let started = Started { level_time: &mut end.level_time, start_time: end.start_time, time_slower: &mut end.time_slower, ui_wait: &mut end.ui_wait };
             activate(&mut end.enders[i], started, &active_enemies, &mut rigs, &mut damage, &mut sounds, &mut rng, &light, &clock);
+        }
+    }
+}
+
+/// `TriggeredByAllPlayers.OnTriggerEnter2D` / `Exit2D` for vehicles: the player flying a
+/// helicopter or driving a car (`Player.Controlling`) enters a trigger when any collider under
+/// the vehicle's root starts overlapping it and leaves when it stops (Moon Race's finishing line).
+fn helicopter_triggers(
+    mut end: ResMut<LevelEnd>,
+    level: Res<ActiveLevel>,
+    collision: Res<crate::level::Collision>,
+    helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
+    cars: Query<(Entity, &crate::cars::Car)>,
+    players: Query<(&Player, Option<&PlayerLives>)>,
+    pilots: Query<(Entity, &crate::vehicles::Piloting), Allow<Disabled>>,
+    mut sounds: MessageWriter<PlaySound>,
+    net: Res<crate::net::Net>,
+    mut inside: Local<std::collections::HashMap<Entity, (usize, Vec<u32>)>>,
+) {
+    let end = &mut *end;
+    let decides = net.decides();
+    let live: Vec<usize> = players.iter().filter(|(_, lives)| lives.is_none_or(|l| l.remaining() >= 0)).map(|(p, _)| p.index).collect();
+    let trigger_object = |collider: u32| level.0.colliders.get(collider as usize).filter(|c| c.trigger).map(|c| c.object);
+    let player_of = |slot: Option<Entity>| slot.and_then(|slot| players.get(slot).ok()).map(|(p, _)| p.index);
+    let mut vehicles: Vec<(Entity, usize, Option<sticks_sim::physics::Body>)> = Vec::new();
+    for (entity, heli) in &helicopters {
+        let Some(player) = player_of(heli.pilot()) else { continue };
+        let body = sticks_sim::physics::Body { position: heli.body.position, velocity: heli.body.linear_velocity, gravity_scale: 0.0, layer: heli.layer, shape: heli.shape.clone() };
+        vehicles.push((entity, player, heli.alive().then_some(body)));
+    }
+    for (entity, car) in &cars {
+        let Some(player) = player_of(car.driver()) else { continue };
+        vehicles.push((entity, player, car.alive().then(|| car.trigger_body())));
+    }
+    let mut seen = Vec::new();
+    for (entity, player, body) in vehicles {
+        seen.push(entity);
+        let now = body.map(|b| b.overlapping_triggers(&collision.world, &collision.rules)).unwrap_or_default();
+        let before = inside.get(&entity).filter(|(p, _)| *p == player).map(|(_, t)| t.clone()).unwrap_or_default();
+        for &collider in now.iter().filter(|c| !before.contains(c)) {
+            let Some(object) = trigger_object(collider) else { continue };
+            // `TimeLimit.OnTriggerEnter2D`: the player controlling the vehicle finished.
+            if let Some(limit) = end.time_limit.as_mut() {
+                if limit.object == object && decides && !limit.expired && !limit.finished.contains(&player) {
+                    if let Some((avatar, _)) = pilots.iter().find(|(_, p)| p.vehicle == entity) {
+                        limit.finished.push(player);
+                        limit.to_show.push((avatar, limit.time_left));
+                        sounds.write(PlaySound { group: "Applause".to_owned(), at: None, owner: None });
+                    }
+                }
+            }
+            for ender in &mut end.enders {
+                for (t, trigger) in &mut ender.triggers {
+                    if *t == object {
+                        trigger.enter(&[player], &live);
+                    }
+                }
+            }
+        }
+        for &collider in before.iter().filter(|c| !now.contains(c)) {
+            let Some(object) = trigger_object(collider) else { continue };
+            for ender in &mut end.enders {
+                for (t, trigger) in &mut ender.triggers {
+                    if *t == object {
+                        trigger.exit(&[player]);
+                    }
+                }
+            }
+        }
+        inside.insert(entity, (player, now));
+    }
+    // A vehicle nobody controls any more has left its triggers (its pilot got out or died).
+    let gone: Vec<Entity> = inside.keys().copied().filter(|e| !seen.contains(e)).collect();
+    for entity in gone {
+        if let Some((player, before)) = inside.remove(&entity) {
+            for collider in before {
+                let Some(object) = trigger_object(collider) else { continue };
+                for ender in &mut end.enders {
+                    for (t, trigger) in &mut ender.triggers {
+                        if *t == object {
+                            trigger.exit(&[player]);
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -379,7 +507,7 @@ fn unscaled_level_end(
     enemies: Query<&Mortal, (With<Enemy>, Allow<Disabled>)>,
     helicopters: Query<&crate::helicopter::Helicopter, Allow<Disabled>>,
     players: Query<(Entity, &Player, &PlayerScore, Option<&PlayerLives>)>,
-    avatars: Query<(&ControlledBy, &Mortal, Option<&Palette>), (Without<Enemy>, Allow<Disabled>)>,
+    avatars: Query<(Entity, &ControlledBy, &Mortal, Option<&Palette>), (Without<Enemy>, Allow<Disabled>)>,
 ) {
     let end = &mut *end;
     end.frames += 1;
@@ -393,6 +521,53 @@ fn unscaled_level_end(
         time_scale.scale = slower.update(time_scale.scale, real.delta_secs());
     }
     let (Some(ui), Some(hud)) = (ui.as_deref_mut(), hud.as_deref_mut()) else { return };
+    // `DestroyAllEnemiesLevelEnder.Update`: the countdown label shows `remaining ?? 0` (until it
+    // activates and disables itself).
+    for ender in &end.enders {
+        if let (Some(count), Some(label), false) = (ender.count, ender.countdown_label, ender.activated) {
+            if let Some(&object) = hud.level_ui.get(&label) {
+                hud.set_text(object, &count.label().to_string());
+            }
+        }
+    }
+    // `TimeLimit.Update` / `LevelCompleted` / `PlayerFinished`.
+    if let Some(limit) = end.time_limit.as_mut() {
+        let named = |hud: &HudScene, name: &str| hud.level_ui.values().copied().find(|&o| hud.scene.objects[o].name == name);
+        let countdown = named(hud, "Countdown");
+        if end.level_time.is_some() && !limit.completed {
+            limit.completed = true;
+            if let Some(o) = countdown {
+                hud.active[o] = false;
+            }
+        }
+        if !limit.expired && !limit.completed {
+            limit.time_left -= scaled.delta_secs();
+            if limit.time_left <= 0.0 {
+                limit.time_left = 0.0;
+                limit.expired = true;
+                info!("time limit: out of time");
+                ui.game_over(hud, &mut time_scale);
+            }
+            if let Some(timer) = countdown.and_then(|o| hud.timer_in(o)) {
+                hud.set_timer(timer, limit.time_left);
+            }
+        }
+        if !limit.to_show.is_empty() {
+            let finishers = named(hud, "Finishers");
+            let shown_before = limit.finished.len() - limit.to_show.len();
+            for (k, (avatar, time)) in limit.to_show.drain(..).enumerate() {
+                let Some(line) = finishers.and_then(|f| hud.scene.objects[f].children.get(shown_before + k).copied()) else { continue };
+                hud.active[line] = true;
+                let body = avatars.get(avatar).ok().and_then(|(_, _, _, p)| p.map(|p| p.0.body)).unwrap_or_else(|| art.as_ref().map_or([255; 4], |a| a.body_color()));
+                if let Some(label) = hud.scene.child(line, "Label") {
+                    hud.set_text_color(label, body.map(|v| f32::from(v) / 255.0));
+                }
+                if let Some(timer) = hud.timer_in(line) {
+                    hud.set_timer(timer, time);
+                }
+            }
+        }
+    }
     // `DisableGameOvering.Start` hides the game-over screen.
     for ender in &end.enders {
         if ender.activated && ender.spec.ender.as_ref().is_some_and(|e| e.disable_game_overing) {
@@ -417,7 +592,7 @@ fn unscaled_level_end(
             end.ui_wait = None;
             let mut results = Vec::new();
             for (slot, player, score, lives) in &players {
-                let Some((_, mortal, palette)) = avatars.iter().find(|(c, _, _)| c.0 == slot) else { continue };
+                let Some((_, _, mortal, palette)) = avatars.iter().find(|(_, c, _, _)| c.0 == slot) else { continue };
                 let body = palette.map_or_else(|| art.as_ref().map_or([255; 4], |a| a.body_color()), |p| p.0.body);
                 results.push((
                     PlayerResult {

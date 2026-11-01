@@ -57,19 +57,53 @@ fn fraction(value: &str) -> Option<f32> {
     value.parse::<f32>().ok().filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0))
 }
 
+/// How the game's window is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayMode {
+    /// A normal window that can be moved and resized.
+    #[default]
+    Windowed,
+    /// A borderless window covering the screen.
+    Borderless,
+    /// Exclusive fullscreen at the screen's current resolution.
+    Fullscreen,
+}
+
+impl DisplayMode {
+    pub const ALL: [DisplayMode; 3] = [DisplayMode::Windowed, DisplayMode::Borderless, DisplayMode::Fullscreen];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DisplayMode::Windowed => "Windowed",
+            DisplayMode::Borderless => "Borderless",
+            DisplayMode::Fullscreen => "Fullscreen",
+        }
+    }
+
+    /// The next mode a click picks.
+    pub fn next(self) -> DisplayMode {
+        let i = DisplayMode::ALL.iter().position(|&m| m == self).unwrap_or(0);
+        DisplayMode::ALL[(i + 1) % DisplayMode::ALL.len()]
+    }
+
+    fn parse(value: &str) -> Option<DisplayMode> {
+        DisplayMode::ALL.into_iter().find(|m| m.name().eq_ignore_ascii_case(value.trim()))
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
     /// 0..=1, multiplies the music.
     pub music_volume: f32,
     /// 0..=1, multiplies every other sound.
     pub sound_volume: f32,
-    pub fullscreen: bool,
+    pub display: DisplayMode,
     pub vsync: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { music_volume: 1.0, sound_volume: 1.0, fullscreen: false, vsync: true }
+        Settings { music_volume: 1.0, sound_volume: 1.0, display: DisplayMode::Windowed, vsync: true }
     }
 }
 
@@ -80,7 +114,13 @@ impl Settings {
             match key {
                 "music_volume" => s.music_volume = fraction(value).unwrap_or(s.music_volume),
                 "sound_volume" => s.sound_volume = fraction(value).unwrap_or(s.sound_volume),
-                "fullscreen" => s.fullscreen = flag(value).unwrap_or(s.fullscreen),
+                // Older files: `fullscreen = true` was the borderless window.
+                "fullscreen" => {
+                    if let Some(on) = flag(value) {
+                        s.display = if on { DisplayMode::Borderless } else { DisplayMode::Windowed };
+                    }
+                }
+                "display" => s.display = DisplayMode::parse(value).unwrap_or(s.display),
                 "vsync" => s.vsync = flag(value).unwrap_or(s.vsync),
                 _ => {}
             }
@@ -89,7 +129,7 @@ impl Settings {
     }
 
     pub fn to_text(&self) -> String {
-        format!("music_volume = {}\nsound_volume = {}\nfullscreen = {}\nvsync = {}\n", self.music_volume, self.sound_volume, self.fullscreen, self.vsync)
+        format!("music_volume = {}\nsound_volume = {}\ndisplay = {}\nvsync = {}\n", self.music_volume, self.sound_volume, self.display.name(), self.vsync)
     }
 
     /// The saved settings, or the defaults.
@@ -223,8 +263,11 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_volumes_cycle() {
-        let s = Settings { music_volume: 0.25, sound_volume: 0.5, fullscreen: true, vsync: false };
-        assert_eq!(Settings::parse(&s.to_text()), s);
+        for display in DisplayMode::ALL {
+            let s = Settings { music_volume: 0.25, sound_volume: 0.5, display, vsync: false };
+            assert_eq!(Settings::parse(&s.to_text()), s);
+        }
+        assert_eq!(Settings::parse("fullscreen = true").display, DisplayMode::Borderless);
         assert_eq!(Settings::parse("music_volume = 7\nnonsense\nvsync = maybe"), Settings { music_volume: 1.0, ..Settings::default() });
         let mut v = 1.0;
         let mut seen = Vec::new();

@@ -20,7 +20,12 @@
 //! * two-point manifolds are solved point by point (Box2D's block solver is not ported);
 //! * every collider uses Unity's default material (friction 0.4, bounciness 0); no
 //!   `PhysicsMaterial2D` is read;
-//! * no continuous collision (time of impact) and no sleeping.
+//! * no continuous collision (time of impact) and no sleeping;
+//! * a `CircleCollider2D` (car wheels) is a rounded octagon ([`Polygon::disc`]): Box2D's
+//!   polygon-and-circle pairs are approximated by polygon pairs with a large skin radius.
+//!
+//! [`WheelJoint`] is `b2WheelJoint` (Unity's `WheelJoint2D`) without its motor: a point-to-line
+//! constraint across the suspension axis and a soft spring along it.
 
 use std::collections::HashMap;
 
@@ -112,6 +117,23 @@ impl Polygon {
         let n = vertices.len();
         let normals = (0..n).map(|i| normalized(perp(vertices[(i + 1) % n] - vertices[i]))).collect();
         Polygon { vertices, normals, radius: POLYGON_RADIUS }
+    }
+
+    /// A circle (`CircleCollider2D`) of `radius` about `center`: an octagon of a third of the
+    /// radius with the rest as skin, so contacts are rounded.
+    pub fn disc(center: Vec2, radius: f32) -> Polygon {
+        let core = radius / 3.0;
+        let vertices = (0..8)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::PI / 4.0;
+                center + Vec2::new(a.cos() * core, a.sin() * core)
+            })
+            .collect();
+        let mut p = Polygon::new(vertices);
+        // The octagon's inradius is `core * cos(22.5°)`; the skin brings its flats out to the
+        // circle (the corners stand out by a few percent of the radius).
+        p.radius = radius - core * (std::f32::consts::PI / 8.0).cos();
+        p
     }
 
     /// Counter-clockwise copy of any convex point list.
@@ -513,8 +535,179 @@ fn xf_of(body: &RigidBody) -> Xf {
     Xf::new(body.position, body.angle)
 }
 
+/// `WheelJoint2D` / `b2WheelJoint` between two of the stepped bodies (by index): body B (the
+/// wheel) keeps its anchor on a line through A's anchor along the suspension axis, held there
+/// by a spring. The motor is not modelled (`CarControl` sets the wheels' angular velocity).
+#[derive(Clone, Debug, PartialEq)]
+pub struct WheelJoint {
+    pub a: usize,
+    pub b: usize,
+    /// Anchors in each body's coordinates (`anchor`, `connectedAnchor`).
+    pub local_anchor_a: Vec2,
+    pub local_anchor_b: Vec2,
+    /// The suspension axis in A's coordinates (unit).
+    pub local_axis_a: Vec2,
+    /// `suspension.frequency` (Hz; 0: rigid) and `dampingRatio`.
+    pub frequency: f32,
+    pub damping_ratio: f32,
+    /// Accumulated impulses (warm starting).
+    pub impulse: f32,
+    pub spring_impulse: f32,
+}
+
+impl WheelJoint {
+    pub fn new(a: usize, b: usize, local_anchor_a: Vec2, local_anchor_b: Vec2, local_axis_a: Vec2, frequency: f32, damping_ratio: f32) -> WheelJoint {
+        WheelJoint { a, b, local_anchor_a, local_anchor_b, local_axis_a: normalized(local_axis_a), frequency, damping_ratio, impulse: 0.0, spring_impulse: 0.0 }
+    }
+}
+
+/// A joint's per-step solver data (`b2WheelJoint::InitVelocityConstraints`).
+struct JointSolver {
+    ax: Vec2,
+    ay: Vec2,
+    s_ax: f32,
+    s_bx: f32,
+    s_ay: f32,
+    s_by: f32,
+    mass: f32,
+    spring_mass: f32,
+    bias: f32,
+    gamma: f32,
+}
+
+fn rotate(angle: f32, v: Vec2) -> Vec2 {
+    let (s, c) = angle.sin_cos();
+    Vec2::new(c * v.x - s * v.y, s * v.x + c * v.y)
+}
+
+fn joint_frame(bodies: &[DynamicBody], j: &WheelJoint) -> (Vec2, Vec2, Vec2, Vec2) {
+    let (a, b) = (&bodies[j.a].body, &bodies[j.b].body);
+    let r_a = rotate(a.angle, j.local_anchor_a - a.local_center);
+    let r_b = rotate(b.angle, j.local_anchor_b - b.local_center);
+    let d = b.world_center() + r_b - a.world_center() - r_a;
+    let ax = rotate(a.angle, j.local_axis_a);
+    (r_a, r_b, d, ax)
+}
+
+fn init_joint(bodies: &[DynamicBody], j: &WheelJoint, h: f32) -> JointSolver {
+    let (a, b) = (&bodies[j.a].body, &bodies[j.b].body);
+    let (m_a, m_b, i_a, i_b) = (a.inv_mass, b.inv_mass, a.inv_inertia, b.inv_inertia);
+    let (r_a, r_b, d, ax) = joint_frame(bodies, j);
+    let ay = perp(ax);
+    let s_ay = cross(d + r_a, ay);
+    let s_by = cross(r_b, ay);
+    let k = m_a + m_b + i_a * s_ay * s_ay + i_b * s_by * s_by;
+    let mass = if k > 0.0 { 1.0 / k } else { 0.0 };
+    let s_ax = cross(d + r_a, ax);
+    let s_bx = cross(r_b, ax);
+    let (mut spring_mass, mut bias, mut gamma) = (0.0, 0.0, 0.0);
+    if j.frequency > 0.0 {
+        let inv_mass = m_a + m_b + i_a * s_ax * s_ax + i_b * s_bx * s_bx;
+        if inv_mass > 0.0 {
+            spring_mass = 1.0 / inv_mass;
+            let c = d.dot(ax);
+            let omega = 2.0 * std::f32::consts::PI * j.frequency;
+            let damping = 2.0 * spring_mass * j.damping_ratio * omega;
+            let stiffness = spring_mass * omega * omega;
+            gamma = h * (damping + h * stiffness);
+            if gamma > 0.0 {
+                gamma = 1.0 / gamma;
+            }
+            bias = c * h * stiffness * gamma;
+            spring_mass = inv_mass + gamma;
+            if spring_mass > 0.0 {
+                spring_mass = 1.0 / spring_mass;
+            }
+        }
+    }
+    JointSolver { ax, ay, s_ax, s_bx, s_ay, s_by, mass, spring_mass, bias, gamma }
+}
+
+/// Apply a joint impulse: linear `p`, angular `l_a` / `l_b` (−A, +B).
+fn apply_joint(bodies: &mut [DynamicBody], j: &WheelJoint, p: Vec2, l_a: f32, l_b: f32) {
+    let a = &mut bodies[j.a].body;
+    a.linear_velocity = a.linear_velocity - p * a.inv_mass;
+    a.angular_velocity -= a.inv_inertia * l_a;
+    let b = &mut bodies[j.b].body;
+    b.linear_velocity = b.linear_velocity + p * b.inv_mass;
+    b.angular_velocity += b.inv_inertia * l_b;
+}
+
+fn solve_joint_velocity(bodies: &mut [DynamicBody], j: &mut WheelJoint, s: &JointSolver) {
+    // The spring along the axis.
+    let (va, wa, vb, wb) = {
+        let (a, b) = (&bodies[j.a].body, &bodies[j.b].body);
+        (a.linear_velocity, a.angular_velocity, b.linear_velocity, b.angular_velocity)
+    };
+    let cdot = s.ax.dot(vb - va) + s.s_bx * wb - s.s_ax * wa;
+    let impulse = -s.spring_mass * (cdot + s.bias + s.gamma * j.spring_impulse);
+    j.spring_impulse += impulse;
+    apply_joint(bodies, j, s.ax * impulse, impulse * s.s_ax, impulse * s.s_bx);
+    // The point-to-line constraint.
+    let (va, wa, vb, wb) = {
+        let (a, b) = (&bodies[j.a].body, &bodies[j.b].body);
+        (a.linear_velocity, a.angular_velocity, b.linear_velocity, b.angular_velocity)
+    };
+    let cdot = s.ay.dot(vb - va) + s.s_by * wb - s.s_ay * wa;
+    let impulse = -s.mass * cdot;
+    j.impulse += impulse;
+    apply_joint(bodies, j, s.ay * impulse, impulse * s.s_ay, impulse * s.s_by);
+}
+
+/// `b2WheelJoint::SolvePositionConstraints`; true when within the slop.
+fn solve_joint_position(bodies: &mut [DynamicBody], j: &WheelJoint) -> bool {
+    let (r_a, r_b, d, ax) = joint_frame(bodies, j);
+    let ay = perp(ax);
+    let s_ay = cross(d + r_a, ay);
+    let s_by = cross(r_b, ay);
+    let c = d.dot(ay);
+    let (m_a, m_b, i_a, i_b) = {
+        let (a, b) = (&bodies[j.a].body, &bodies[j.b].body);
+        (a.inv_mass, b.inv_mass, a.inv_inertia, b.inv_inertia)
+    };
+    let k = m_a + m_b + i_a * s_ay * s_ay + i_b * s_by * s_by;
+    let impulse = if k != 0.0 { -c / k } else { 0.0 };
+    let p = ay * impulse;
+    let (l_a, l_b) = (impulse * s_ay, impulse * s_by);
+    {
+        let a = &mut bodies[j.a].body;
+        let center = a.world_center() - p * a.inv_mass;
+        a.angle -= a.inv_inertia * l_a;
+        set_center(a, center);
+    }
+    {
+        let b = &mut bodies[j.b].body;
+        let center = b.world_center() + p * b.inv_mass;
+        b.angle += b.inv_inertia * l_b;
+        set_center(b, center);
+    }
+    c.abs() <= LINEAR_SLOP
+}
+
+/// Place the body so its centre of mass is at `center` (at its current angle).
+fn set_center(body: &mut RigidBody, center: Vec2) {
+    let lc = rotate(body.angle, body.local_center);
+    body.position = center - lc;
+}
+
 /// One physics step for `bodies` against `world` and each other. Returns what touched what.
 pub fn step(bodies: &mut [DynamicBody], world: &World, rules: &PhysicsRules, h: f32, velocity_iterations: u32, position_iterations: u32, warm: &mut WarmStart) -> Vec<Touch> {
+    step_with_joints(bodies, &mut [], world, rules, h, velocity_iterations, position_iterations, warm)
+}
+
+/// [`step`] with wheel joints between the bodies (jointed bodies do not collide with each
+/// other, as `WheelJoint2D.enableCollision` is off by default).
+#[allow(clippy::too_many_arguments)]
+pub fn step_with_joints(
+    bodies: &mut [DynamicBody],
+    joints: &mut [WheelJoint],
+    world: &World,
+    rules: &PhysicsRules,
+    h: f32,
+    velocity_iterations: u32,
+    position_iterations: u32,
+    warm: &mut WarmStart,
+) -> Vec<Touch> {
     // ---- Collide, at the transforms the bodies start the step with.
     let mut contacts: Vec<ContactEntry> = Vec::new();
     for (ia, a) in bodies.iter().enumerate() {
@@ -557,7 +750,7 @@ pub fn step(bodies: &mut [DynamicBody], world: &World, rules: &PhysicsRules, h: 
             });
         }
         for (ib, b) in bodies.iter().enumerate().skip(ia + 1) {
-            if !rules.layers_collide(a.layer, b.layer) {
+            if !rules.layers_collide(a.layer, b.layer) || joints.iter().any(|j| (j.a == ia && j.b == ib) || (j.a == ib && j.b == ia)) {
                 continue;
             }
             let xf_b = xf_of(&b.body);
@@ -642,6 +835,14 @@ pub fn step(bodies: &mut [DynamicBody], world: &World, rules: &PhysicsRules, h: 
             });
         }
     }
+    // Joints: initialise and warm start (Box2D's island inits joints after contacts).
+    let solvers: Vec<JointSolver> = joints.iter().map(|j| init_joint(bodies, j, h)).collect();
+    for (j, s) in joints.iter().zip(&solvers) {
+        let p = s.ay * j.impulse + s.ax * j.spring_impulse;
+        let l_a = j.impulse * s.s_ay + j.spring_impulse * s.s_ax;
+        let l_b = j.impulse * s.s_by + j.spring_impulse * s.s_bx;
+        apply_joint(bodies, j, p, l_a, l_b);
+    }
     // Warm start.
     for c in &contacts {
         let tangent = perp(c.normal);
@@ -652,6 +853,10 @@ pub fn step(bodies: &mut [DynamicBody], world: &World, rules: &PhysicsRules, h: 
     }
     // Velocity iterations: friction first, then the normal, point by point.
     for _ in 0..velocity_iterations {
+        // `b2Island::Solve`: joints before contacts.
+        for (j, s) in joints.iter_mut().zip(&solvers) {
+            solve_joint_velocity(bodies, j, s);
+        }
         for c in &mut contacts {
             let tangent = perp(c.normal);
             for k in 0..c.points.len() {
@@ -719,7 +924,11 @@ pub fn step(bodies: &mut [DynamicBody], world: &World, rules: &PhysicsRules, h: 
                 }
             }
         }
-        if min_separation >= POSITION_TOLERANCE {
+        let mut joints_ok = true;
+        for j in joints.iter() {
+            joints_ok &= solve_joint_position(bodies, j);
+        }
+        if min_separation >= POSITION_TOLERANCE && joints_ok {
             break;
         }
     }
@@ -896,5 +1105,69 @@ mod tests {
         assert!((normal.y + 1.0).abs() < 1e-5);
         assert!(pts[0].1 < 0.0);
         assert!(collide_polygon_circle(&b, &Xf::IDENTITY, Vec2::new(0.0, -2.0), 0.5, &Xf::IDENTITY).is_none());
+    }
+
+    /// A 4×1 car body with two wheels of radius 0.5 hung 1 below it on springs.
+    fn car(y: f32) -> (Vec<DynamicBody>, Vec<WheelJoint>) {
+        let chassis = vec![Polygon::new(vec![Vec2::new(-2.0, -0.5), Vec2::new(2.0, -0.5), Vec2::new(2.0, 0.5), Vec2::new(-2.0, 0.5)])];
+        let mut body = RigidBody::new(Vec2::new(0.0, y), 0.0, 4.0, 0.0, 0.05, 1.0);
+        let (lc, inertia) = mass_properties(&chassis, 4.0);
+        body.local_center = lc;
+        body.inertia = inertia;
+        body.inv_inertia = 1.0 / inertia;
+        let mut bodies = vec![DynamicBody { key: 1, body, pieces: chassis, layer: 0 }];
+        let mut joints = Vec::new();
+        for (k, x) in [-1.5f32, 1.5].into_iter().enumerate() {
+            let mut wheel = RigidBody::new(Vec2::new(x, y - 1.0), 0.0, 1.0, 0.0, 0.05, 1.0);
+            wheel.inertia = 0.5 * 1.0 * 0.25;
+            wheel.inv_inertia = 1.0 / wheel.inertia;
+            bodies.push(DynamicBody { key: 2 + k as u64, body: wheel, pieces: vec![Polygon::disc(Vec2::ZERO, 0.5)], layer: 0 });
+            joints.push(WheelJoint::new(0, 1 + k, Vec2::new(x, -1.0), Vec2::ZERO, Vec2::new(0.0, 1.0), 4.0, 0.7));
+        }
+        (bodies, joints)
+    }
+
+    #[test]
+    fn disc_is_round_enough() {
+        let d = Polygon::disc(Vec2::ZERO, 0.5);
+        // Flats and corners are both within 5% of the radius.
+        let core = d.vertices[0].magnitude();
+        assert!((core + d.radius - 0.5).abs() < 0.03, "corner {}", core + d.radius);
+        assert!((core * (std::f32::consts::PI / 8.0).cos() + d.radius - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn car_settles_on_its_wheels_and_drives() {
+        let world = ground();
+        let rules = rules();
+        let (mut bodies, mut joints) = car(3.0);
+        let mut warm = WarmStart::default();
+        for _ in 0..240 {
+            step_with_joints(&mut bodies, &mut joints, &world, &rules, 1.0 / 60.0, 8, 3, &mut warm);
+        }
+        // Wheels rest on the ground (top at y = 0), the body above them.
+        for w in &bodies[1..] {
+            assert!((w.body.position.y - 0.5).abs() < 0.06, "wheel at {:?}", w.body.position);
+        }
+        let chassis = bodies[0].body.position;
+        assert!(chassis.y > 0.6 && chassis.y < 1.6, "chassis at {chassis:?}");
+        assert!(bodies[0].body.angle.abs() < 0.02);
+        // Spin the wheels clockwise (forward, +x) as `CarControl` does: the car rolls right.
+        let start = chassis.x;
+        for _ in 0..120 {
+            for w in &mut bodies[1..] {
+                w.body.angular_velocity = -10.0;
+            }
+            step_with_joints(&mut bodies, &mut joints, &world, &rules, 1.0 / 60.0, 8, 3, &mut warm);
+        }
+        let moved = bodies[0].body.position.x - start;
+        assert!(moved > 3.0, "moved {moved}");
+        // The wheels stay under the body (the joint holds them on their axis lines).
+        let a = bodies[0].body.angle;
+        for (k, w) in bodies[1..].iter().enumerate() {
+            let anchor = bodies[0].body.position + rotate(a, Vec2::new(if k == 0 { -1.5 } else { 1.5 }, -1.0));
+            let off = w.body.position - anchor;
+            assert!(off.dot(rotate(a, Vec2::new(1.0, 0.0))).abs() < 0.05, "wheel {k} off its line by {off:?}");
+        }
     }
 }

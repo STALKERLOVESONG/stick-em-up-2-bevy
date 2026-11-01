@@ -1,3 +1,7 @@
+// No console window behind the game or the launcher on Windows (the launcher writes the
+// game's log to `SEU2_log.txt` instead).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use bevy::asset::{AssetMetaCheck, AssetPlugin};
 use bevy::prelude::*;
 use bevy::window::WindowPlugin;

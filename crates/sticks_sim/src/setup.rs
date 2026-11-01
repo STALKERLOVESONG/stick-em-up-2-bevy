@@ -83,7 +83,11 @@ pub fn load_level_bundle_with(
     let settings_text = std::fs::read_to_string(export_root.join("ProjectSettings/Physics2DSettings.asset"))?;
     let settings = unity_data::settings::parse_physics2d(&settings_text)
         .ok_or_else(|| std::io::Error::other("Physics2DSettings.asset could not be parsed"))?;
-    let rules = physics_rules(&settings);
+    let mut rules = physics_rules(&settings);
+    // `GravityChanger.OnEnable` replaces `Physics2D.gravity` for as long as the level is loaded.
+    if let Some([x, y]) = level.gravity {
+        rules.gravity = Vec2::new(x, y);
+    }
     let world = build_world(&level);
     let animation = crate::animator::AnimatorModel::new(unity_data::anim::load_character_animation(&export_root.join("Assets"))?);
     Ok(LevelBundle { level, rules, world, animation })

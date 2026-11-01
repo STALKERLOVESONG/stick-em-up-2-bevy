@@ -10,6 +10,7 @@ pub mod aim;
 pub mod animator;
 pub mod audio;
 pub mod camera;
+pub mod car;
 pub mod character;
 pub mod contact;
 pub mod control_assignment;

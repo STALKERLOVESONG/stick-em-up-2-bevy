@@ -11,9 +11,17 @@
 //! H7: hulls collide with the level and each other through `sticks_sim::contact` (Box2D's
 //! contact solver) and push characters as moving obstacles.
 //!
-//! Not yet (see the handoff's helicopter plan): the seated occupants (H5: the pilot and passenger figures are not
-//! drawn), the explosion (H4) and with it the player helicopter's respawn
-//! (`RespawnerInstantiator`, `RespawnAtStartPosition`), which waits for `ExplosionFinished`.
+//! H4: when its `Health` runs out (`TellOwnerToExplodeOnHealthExhausted` → `Explodable.Explode`)
+//! the controllers are ejected (`EjectControllersOnExplode`, `crate::vehicles`), its sound plays
+//! (`PlaySoundOnExplode`) and its sprites fly apart (`ExplodeSpritesAndLines`; the object
+//! switches off). When the explosion is over (`ExplosionFinished`) a player helicopter comes
+//! back where it started with full health (`RespawnerInstantiator` → `Respawner`,
+//! `RespawnAtStartPosition`) and an enemy one is gone (`DestroyRootOnRootExplosionFinished`).
+//! TODO(UNCERTAIN): the rotor blades are not among the exploding parts, and a respawned
+//! helicopter starts at rest.
+//!
+//! The seated occupants (`VehicleOccupant`) are drawn with [`ManArt::occupant_renderers`]; the
+//! gunner seats do not follow a gunner yet.
 //! TODO(UNCERTAIN): `HelicopterInput` and the AI behaviours share execution order 0; the input is
 //! taken to copy the processor before the behaviours run (component order), so the flight acts on
 //! the previous frame's decision, as for enemy soldiers.
@@ -21,6 +29,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::ecs::entity_disabling::Disabled;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use sticks_sim::ai::{Candidate, OffScreenSleep, Targeter};
@@ -121,6 +130,12 @@ pub struct Helicopter {
     node_active: Vec<bool>,
     root_z: f32,
     root_scale: [f32; 3],
+    /// Exhausted, not exploded yet (the explosion is built where the drawing state is).
+    explode_pending: bool,
+    /// `ExplodeSpritesAndLines`: the parts in flight and the art they are drawn with.
+    explosion: Option<(sticks_sim::explosion::Explosion, sticks_sim::visual::VisualArt)>,
+    /// `RespawnAtStartPosition`: where the body started.
+    start: (SimVec2, f32),
 }
 
 impl Helicopter {
@@ -142,6 +157,17 @@ impl Helicopter {
             w = Affine::from_trs(w.t, (q.x, q.y, q.z, q.w), s);
         }
         w
+    }
+
+    fn active_in_hierarchy(&self, node: usize) -> bool {
+        let mut current = Some(node);
+        while let Some(c) = current {
+            if !self.node_active.get(c).copied().unwrap_or(false) {
+                return false;
+            }
+            current = self.spec.nodes[c].parent;
+        }
+        true
     }
 
     fn node_rotation(&self, i: usize) -> SimQuat {
@@ -174,7 +200,7 @@ impl Helicopter {
             .collect();
     }
 
-    fn alive(&self) -> bool {
+    pub(crate) fn alive(&self) -> bool {
         !self.health.is_exhausted()
     }
 
@@ -353,6 +379,7 @@ impl Helicopter {
                 self.flash = 0.1;
             } else if was_alive {
                 info!("{} destroyed", self.spec.name);
+                self.explode_pending = true;
             }
         } else if remaining == self.health.starting() {
             self.health.reset();
@@ -389,6 +416,7 @@ impl Plugin for HelicopterPlugin {
                     publish_hulls.in_set(crate::FrameSet::Input),
                     fly_helicopters.in_set(crate::FrameSet::FixedSteps).before(crate::weapon::step_projectiles),
                     hit_helicopters.in_set(crate::FrameSet::FixedSteps).after(crate::weapon::step_projectiles),
+                    explode_helicopters.in_set(crate::FrameSet::Characters),
                     (sleep_helicopters.run_if(crate::net::decides), think_helicopters, fire_helicopter_guns).chain().in_set(crate::FrameSet::Characters),
                 ),
             )
@@ -540,6 +568,7 @@ fn spawn_helicopters(
         if enemy && spec.control_slot {
             warn!("{}: an enemy helicopter with a usable ControlSlot; players could board it", spec.name);
         }
+        let start = (body.position, body.angle);
         let mut helicopter = Helicopter {
             body,
             control: HelicopterControl::default(),
@@ -575,6 +604,9 @@ fn spawn_helicopters(
             node_active,
             root_z: spec.world.t[2],
             root_scale: spec.world.lossy_scale(),
+            explode_pending: false,
+            explosion: None,
+            start,
             spec,
         };
         helicopter.rebuild_shape();
@@ -632,8 +664,8 @@ fn fly_helicopters(clock: Res<FrameClock>, collision: Res<Collision>, mut helico
 /// left it.
 /// TODO(UNCERTAIN): the characters push nothing back (their mass against the helicopter's is
 /// ignored), and a hull is not interleaved step by step with the characters' fixed steps.
-fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopter>) {
-    let items = helicopters
+fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopter>, cars: Query<&crate::cars::Car>) {
+    let mut items: Vec<_> = helicopters
         .iter()
         .filter(|h| h.is_active_object())
         .enumerate()
@@ -643,11 +675,13 @@ fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopte
             (collider, pieces)
         })
         .collect();
+    // The cars' chassis and wheels too (`crate::cars`).
+    items.extend(crate::cars::car_obstacles(&cars));
     collision.world.set_moving(items);
 }
 
-/// `Health.Damage` from projectiles; `HelicopterColor` flashes the fuselage.
-/// TODO: the explosion (`ExplodeSpritesAndLines`, occupants) when the health runs out.
+/// `Health.Damage` from projectiles; `HelicopterColor` flashes the fuselage; an exhausted hull
+/// explodes (`explode_helicopters`).
 fn hit_helicopters(mut hits: MessageReader<HelicopterHit>, mut helicopters: Query<(&mut Helicopter, Option<&crate::net::NetObject>)>, mut net: ResMut<crate::net::Net>) {
     // In a network game only the host's hits count; the others take the host's health.
     if net.is_client() {
@@ -672,7 +706,107 @@ fn hit_helicopters(mut hits: MessageReader<HelicopterHit>, mut helicopters: Quer
             h.flash = 0.1;
         } else {
             info!("{} destroyed", h.spec.name);
+            h.explode_pending = true;
         }
+    }
+}
+
+/// `Explodable.Explode` of an exhausted helicopter (`PlaySoundOnExplode`,
+/// `ExplodeSpritesAndLines` from what was drawn), `Explosion.Update`, and `ExplosionFinished`:
+/// a player helicopter respawns at its start (`Respawner`, `RespawnAtStartPosition`), an enemy
+/// one is destroyed.
+#[allow(clippy::too_many_arguments)]
+fn explode_helicopters(
+    mut commands: Commands,
+    art: Option<Res<ManArt>>,
+    light: Res<SceneLight>,
+    clock: Res<FrameClock>,
+    mut rng: ResMut<crate::life::DeathRng>,
+    mut sounds: MessageWriter<PlaySound>,
+    mut helicopters: Query<(Entity, &mut Helicopter)>,
+) {
+    let delta = clock.stepper.frame().delta;
+    for (entity, mut h) in &mut helicopters {
+        if h.explode_pending {
+            h.explode_pending = false;
+            let root = h.root_affine();
+            let at = SimVec3::new(root.t[0], root.t[1], root.t[2]);
+            if let Some(sound) = &h.spec.explode_sound {
+                sounds.write(PlaySound { group: sound.clone(), at: Some(at), owner: None });
+            }
+            match (h.spec.explosion_fade_wait, art.as_ref()) {
+                (Some(fade_wait), Some(art)) => {
+                    let mut parts_art = sticks_sim::visual::VisualArt::empty(art.art.line_uvs());
+                    let mut parts = Vec::new();
+                    for s in &h.sprites {
+                        let mut active = true;
+                        let mut current = Some(s.node);
+                        while let Some(c) = current {
+                            active &= h.node_active[c];
+                            current = h.spec.nodes[c].parent;
+                        }
+                        if !active || s.tiled.is_some() {
+                            continue;
+                        }
+                        parts_art.add_def(&s.def, s.shadow.as_ref().map(|(d, _, _)| d), s.texture);
+                        let world = h.node_world(s.node, &root);
+                        let position = SimVec3::new(world.t[0], world.t[1], world.t[2]);
+                        let plane = s.shadow.as_ref().map_or(0.0, |(_, _, p)| *p);
+                        let (shadow_offset, shadow_scale) = match light.for_shadows {
+                            Some(l) => shadow_offset_and_scale(l, position, plane),
+                            None => ([0.0, 0.0], 1.0),
+                        };
+                        let q = h.node_rotation(s.node);
+                        let lossy = world.lossy_scale();
+                        let color = if Some(s.node) == h.spec.fuselage { h.fuselage_color } else { s.color };
+                        parts.push(sticks_sim::visual::FlatSpriteInstance {
+                            bone: 0,
+                            sprite_name: s.def.name.clone(),
+                            position,
+                            flipped: false,
+                            roll_degrees: 0.0,
+                            tilt: [q.x, q.y, q.z, q.w],
+                            scale: [s.scale[0] * lossy[0], s.scale[1] * lossy[1], s.scale[2] * lossy[2]],
+                            color,
+                            shadow_plane_z: plane,
+                            shadow_offset,
+                            shadow_scale,
+                        });
+                    }
+                    let visual = sticks_sim::visual::CharacterVisual { shadows: Vec::new(), lines: Vec::new(), sprites: parts };
+                    let explosion = sticks_sim::explosion::Explosion::go(&visual, at, at, fade_wait, &mut rng.0, clock.last_step_delta);
+                    h.explosion = Some((explosion, parts_art));
+                }
+                // No explosion object: `Explodable.Finished` at once.
+                _ => h.explosion = None,
+            }
+            if h.explosion.is_none() {
+                finish_explosion(&mut commands, entity, &mut *h);
+            }
+            continue;
+        }
+        let finished = h.explosion.as_mut().is_some_and(|(e, _)| e.update(delta));
+        if finished {
+            h.explosion = None;
+            finish_explosion(&mut commands, entity, &mut *h);
+        }
+    }
+}
+
+/// `Explodable.ExplosionFinished`.
+fn finish_explosion(commands: &mut Commands, entity: Entity, h: &mut Helicopter) {
+    if h.spec.respawns && h.spec.enemy.is_none() {
+        // `Respawner`: `health.Reset()`, `SetActive(true)`, `OnRespawned` → `RespawnAtStartPosition`.
+        let _ = h.health.reset();
+        h.body.position = h.start.0;
+        h.body.angle = h.start.1;
+        h.body.linear_velocity = SimVec2::ZERO;
+        h.body.angular_velocity = 0.0;
+        h.flash = 0.0;
+        h.rebuild_shape();
+        info!("{} respawned", h.spec.name);
+    } else {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -860,7 +994,9 @@ fn queue_helicopters(
     clock: Res<FrameClock>,
     windows: Query<&Window, With<PrimaryWindow>>,
     rigs: Query<&Rig, With<LevelCamera>>,
-    mut helicopters: Query<&mut Helicopter>,
+    animation: Option<Res<crate::level::CharacterAnimation>>,
+    mut helicopters: Query<(Entity, &mut Helicopter)>,
+    pilots: Query<(&crate::vehicles::Piloting, Option<&crate::figure::Palette>), With<Disabled>>,
     mut queue: ResMut<FrameQueue>,
 ) {
     let Some(art) = art else { return };
@@ -869,7 +1005,14 @@ fn queue_helicopters(
     let camera = view.camera;
     let light = light.for_shadows;
     let delta = clock.stepper.frame().delta;
-    for mut h in &mut helicopters {
+    for (entity, mut h) in &mut helicopters {
+        if let Some((explosion, parts_art)) = &h.explosion {
+            for (texture, g) in explosion.renderers_textured(parts_art, light) {
+                if !g.is_empty() {
+                    queue.0.push_frame(texture.unwrap_or(art.texture), g);
+                }
+            }
+        }
         if h.asleep.is_some() || !h.alive() {
             continue;
         }
@@ -935,6 +1078,33 @@ fn queue_helicopters(
             };
             h.rotor_angles[r] = angle;
             renderers.push((art.texture, lines_geometry(&lines, hub, light, art.art.line_uvs())));
+        }
+        // `VehicleOccupant`s: the pilot while a player flies (`HelicopterControl.SetController`,
+        // in the player's colours); an enemy's pilot and any passenger as the scene enables them.
+        // TODO(UNCERTAIN): occupants not coloured by a player use the `Man` prefab's colours
+        // (the occupant prefab's helmet is the same red); gunner seats follow no gunner yet.
+        if let Some(animation) = animation.as_ref() {
+            let piloted = h.pilot().is_some();
+            let seats: Vec<(&unity_data::vehicles::OccupantSeat, bool)> = h
+                .spec
+                .pilot
+                .iter()
+                .map(|seat| (seat, piloted || (h.spec.enemy.is_some() && seat.enabled)))
+                .chain(h.spec.passengers.iter().map(|seat| (seat, seat.enabled)))
+                .collect();
+            for (seat, shown) in seats {
+                if !shown || !h.active_in_hierarchy(seat.node) {
+                    continue;
+                }
+                let is_pilot = h.spec.pilot.as_ref().is_some_and(|p| p.node == seat.node);
+                let palette = (is_pilot && piloted)
+                    .then(|| pilots.iter().find(|(p, _)| p.vehicle == entity).and_then(|(_, p)| p.map(|p| p.0)))
+                    .flatten()
+                    .unwrap_or_else(|| art.prefab_palette());
+                let world = h.node_world(seat.node, &root);
+                let at = SimVec3::new(world.t[0], world.t[1], world.t[2]);
+                renderers.extend(art.occupant_renderers(&animation.0, &seat.animation_state, at, h.node_rotation(seat.node), palette, light));
+            }
         }
         for (texture, g) in renderers {
             if !g.is_empty() && view.may_see(g.bounds_center(), crate::unity_render::extent(&g)) {

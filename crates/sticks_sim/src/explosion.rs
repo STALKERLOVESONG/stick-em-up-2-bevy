@@ -194,7 +194,7 @@ impl Explosion {
         let mut sprites = Vec::with_capacity(last.sprites.len());
         for sprite in &last.sprites {
             // `FlatSprite.LateUpdate`: `localEulerAngles = (0, flip ? 180 : 0, roll)`.
-            let rotation = Quat::euler_y_degrees(if sprite.flipped { 180.0 } else { 0.0 }) * Quat::about_z(sprite.roll_degrees.to_radians());
+            let rotation = Quat::euler_y_degrees(if sprite.flipped { 180.0 } else { 0.0 }) * Quat::about_z(sprite.roll_degrees.to_radians()) * Quat::from_array(sprite.tilt);
             sprites.push(SpritePart {
                 sprite_name: sprite.sprite_name.clone(),
                 position: sprite.position,
@@ -305,6 +305,11 @@ impl Explosion {
     /// The renderers this frame: the explosion's `LinesRenderer` (every shadow line, then every
     /// line), then each sprite and its `SpriteShadower` copy.
     pub fn renderers(&self, art: &VisualArt, light: Option<Vec3>) -> Vec<Geometry> {
+        self.renderers_textured(art, light).into_iter().map(|(_, g)| g).collect()
+    }
+
+    /// [`Self::renderers`] with each piece's atlas when it is not the art's own.
+    pub fn renderers_textured(&self, art: &VisualArt, light: Option<Vec3>) -> Vec<(Option<u32>, Geometry)> {
         let mut out = Vec::new();
         let mut shadows = Vec::with_capacity(self.lines.len());
         let mut lines = Vec::with_capacity(self.lines.len());
@@ -341,13 +346,14 @@ impl Explosion {
             g.colors.extend([color32(line.color.map(|v| f32::from(v) / 255.0)); 8]);
             g.indices.extend(LINE_TRIANGLES.iter().map(|i| base + i));
         }
-        out.push(g);
+        out.push((None, g));
         for sprite in &self.sprites {
             let Some(sprite_art) = art.sprite(&sprite.sprite_name) else { continue };
+            let texture = sprite_art.texture;
             let r = sprite.rotation;
             let p = sprite.position;
             let world = unity_data::math::Affine::from_trs([p.x, p.y, p.z], (r.x, r.y, r.z, r.w), [1.0; 3]);
-            out.push(sprite_geometry(&sprite_art.def, sprite.scale, sprite.color, &world));
+            out.push((texture, sprite_geometry(&sprite_art.def, sprite.scale, sprite.color, &world)));
             if let Some(shadow) = &sprite_art.shadow_def {
                 let (offset, k) = match light {
                     Some(light) => shadow_offset_and_scale(light, p, sprite.shadow_plane_z),
@@ -355,7 +361,7 @@ impl Explosion {
                 };
                 let at = [p.x + offset[0], p.y + offset[1], p.z + SHADOW_DEPTH];
                 let world = unity_data::math::Affine::from_trs(at, (r.x, r.y, r.z, r.w), [1.0; 3]);
-                out.push(sprite_geometry(shadow, [sprite.scale[0] * k, sprite.scale[1] * k, 1.0], [0.0, 0.0, 0.0, sprite.color[3]], &world));
+                out.push((texture, sprite_geometry(shadow, [sprite.scale[0] * k, sprite.scale[1] * k, 1.0], [0.0, 0.0, 0.0, sprite.color[3]], &world)));
             }
         }
         out
@@ -375,6 +381,7 @@ mod tests {
             position: Vec3::new(10.0, 2.0, -0.2),
             flipped: false,
             roll_degrees: 0.0,
+            tilt: crate::visual::NO_TILT,
             scale: [1.0; 3],
             color: [1.0, 0.5, 0.25, 1.0],
             shadow_plane_z: 0.0,

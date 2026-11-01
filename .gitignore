@@ -31,5 +31,5 @@ claude_build.bat
 /dist/
 /packaging/tools/
 /packaging/assets_exported/
-/tools/
+/tools/AssetRipper/
 /assets_exported/

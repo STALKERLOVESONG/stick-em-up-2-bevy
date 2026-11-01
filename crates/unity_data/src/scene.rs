@@ -142,6 +142,11 @@ impl<'a> GameObject<'a> {
             .unwrap_or_default()
     }
 
+    /// The scene this object belongs to.
+    pub fn scene(&self) -> &'a Scene {
+        self.scene
+    }
+
     pub fn component(&self, class_id: u32) -> Option<&'a Document> {
         self.components().into_iter().find(|c| c.class_id == class_id)
     }

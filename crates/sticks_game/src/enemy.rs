@@ -125,7 +125,9 @@ fn spawn_enemies(
     art: Res<ManArt>,
     mut rng: ResMut<DeathRng>,
 ) {
-    if level.0.enemies.is_empty() {
+    // Only the development level `Platforms` gets the test target: Moon Race and other levels
+    // without enemies are meant to be empty.
+    if level.0.enemies.is_empty() && level.0.name == "Platforms" && !crate::settings::original_only() {
         spawn_target_dummy(&mut commands, &level, &collision, &animation);
         return;
     }
@@ -230,7 +232,7 @@ fn spawn_enemies(
     info!("spawned {} enemies", level.0.enemies.len());
 }
 
-/// Not part of the original: on a level without enemies (the default `Platforms`), one idle
+/// Not part of the original: on the enemy-less development level `Platforms`, one idle
 /// enemy `Man` stands near the second spawn point as a shootable target for testing weapons.
 fn spawn_target_dummy(commands: &mut Commands, level: &ActiveLevel, collision: &Collision, animation: &CharacterAnimation) {
     let points = &level.0.spawn_points;

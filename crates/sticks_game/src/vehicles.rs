@@ -65,7 +65,7 @@ impl Plugin for VehiclePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<EnterableVehicle>()
             .add_systems(OnExit(AppState::InGame), |mut enterable: ResMut<EnterableVehicle>| enterable.0 = None)
-            .add_systems(Update, read_helicopter_input.in_set(FrameSet::RoleInput).run_if(in_state(AppState::InGame)))
+            .add_systems(Update, (read_helicopter_input, read_car_input).in_set(FrameSet::RoleInput).run_if(in_state(AppState::InGame)))
             .add_systems(
                 Update,
                 (enter_vehicles, leave_vehicles)
@@ -147,11 +147,57 @@ pub(crate) fn read_helicopter_input(
     }
 }
 
+/// `CarInput.OwnerOnlyUpdate` for driven cars: `KeyboardAndMouseCarInput` (`DesiredSpeed` =
+/// W/S, `ClockwiseRotation` = A/D, E leaves) or a gamepad's helicopter processor (its movement
+/// stick), whichever the player's devices make current.
+pub(crate) fn read_car_input(keys: Res<ButtonInput<KeyCode>>, mut pads: ResMut<Gamepads>, mouse: Res<MouseActivity>, mut slots: Query<&mut PlayerDevices>, mut cars: Query<&mut crate::cars::Car>) {
+    let axis = |negative: KeyCode, positive: KeyCode| (if keys.pressed(negative) { -1.0 } else { 0.0 }) + (if keys.pressed(positive) { 1.0 } else { 0.0 });
+    let movement = SimVec2::new(axis(KeyCode::KeyA, KeyCode::KeyD), axis(KeyCode::KeyS, KeyCode::KeyW));
+    let exit = keys.just_pressed(ENTER_OR_EXIT_KEY);
+    let keyboard = HelicopterControls { movement, fire: false, aim: None, exit };
+    let keyboard_status = keyboard_helicopter_status(movement, false, exit, mouse.moved_last_frame);
+    for mut car in &mut cars {
+        let Some(driver) = car.driver() else { continue };
+        let Ok(mut devices) = slots.get_mut(driver) else { continue };
+        let devices = &mut *devices;
+        let list = devices.devices.clone();
+        let mut outputs: Vec<Option<HelicopterControls>> = vec![None; list.len()];
+        let current = devices.helicopter.update(
+            list.len(),
+            |i| match list[i] {
+                InputDevice::KeyboardMouse => {
+                    outputs[i] = Some(keyboard);
+                    keyboard_status
+                }
+                InputDevice::Gamepad(k) => match pads.frame_mut(k) {
+                    None => ProcessorStatus::Unavailable,
+                    Some(f) => {
+                        outputs[i] = Some(f.helicopter.process(&f.state, &f.edges));
+                        if f.state.is_active() { ProcessorStatus::Active } else { ProcessorStatus::Idle }
+                    }
+                },
+            },
+            |i| list[i].kind(),
+        );
+        match current.and_then(|i| outputs[i]) {
+            Some(c) => {
+                car.input = (c.movement.y, c.movement.x);
+                car.exit = c.exit;
+            }
+            None => {
+                car.input = (0.0, 0.0);
+                car.exit = false;
+            }
+        }
+    }
+}
+
 /// `CharacterControl2D.Update`'s vehicle search and `ControlSlot.SendRequestForControlFrom`.
 fn enter_vehicles(
     mut commands: Commands,
     avatars: Query<(Entity, &Avatar, &Mortal, &ControlledBy, Option<&Team>, Option<&EnterVehiclePressed>), Without<Enemy>>,
     mut helicopters: Query<(Entity, &mut Helicopter)>,
+    mut cars: Query<(Entity, &mut crate::cars::Car)>,
     mut enterable: ResMut<EnterableVehicle>,
     players: Query<(), With<crate::player::Player>>,
 ) {
@@ -176,21 +222,35 @@ fn enter_vehicles(
             entities.push(entity);
             candidates.push(Enterable { position, selectable });
         }
+        for (entity, car) in &cars {
+            let Some(slot) = car.slot else { continue };
+            let position = car.slot_position();
+            let selectable = car.is_target() && slot.can_be_controlled_by(player, position, Some(at), true) && !slot.is_controlled_by(player);
+            entities.push(entity);
+            candidates.push(Enterable { position, selectable });
+        }
         let chosen = nearest_enterable(at, &candidates).map(|i| entities[i]);
         enterable.0 = chosen;
         let Some(vehicle) = chosen.filter(|_| pressed.is_some_and(|p| p.0)) else { continue };
-        let Ok((_, mut h)) = helicopters.get_mut(vehicle) else { continue };
-        // `RelinquishControlExceptFor`: the avatar's object is deactivated.
-        h.take_control(player, team.map_or(0, |t| t.0.clamp(0, 3) as u8), active_players);
+        let team_index = team.map_or(0, |t| t.0.clamp(0, 3) as u8);
+        if let Ok((_, mut h)) = helicopters.get_mut(vehicle) {
+            // `RelinquishControlExceptFor`: the avatar's object is deactivated.
+            h.take_control(player, team_index, active_players);
+            info!("player boarded {}", h.spec.name);
+        } else if let Ok((_, mut car)) = cars.get_mut(vehicle) {
+            car.take_control(player, team_index);
+            info!("player boarded {}", car.spec.name);
+        } else {
+            continue;
+        }
         commands.entity(avatar_entity).insert((Disabled, Piloting { vehicle }));
         enterable.0 = None;
-        info!("player boarded {}", h.spec.name);
     }
 }
 
 /// `HelicopterControl.Update` (exit unless `controllerJustSet`), `EjectControllersOnExplode`, then
 /// `Player.Update`: the avatar reappears at the disembarkment point.
-fn leave_vehicles(mut commands: Commands, mut helicopters: Query<(Entity, &mut Helicopter)>, mut avatars: Query<(Entity, &mut Avatar, &Piloting), With<Disabled>>) {
+fn leave_vehicles(mut commands: Commands, mut helicopters: Query<(Entity, &mut Helicopter)>, mut cars: Query<(Entity, &mut crate::cars::Car)>, mut avatars: Query<(Entity, &mut Avatar, &Piloting), With<Disabled>>) {
     let mut released: Vec<(Entity, Option<SimVec3>)> = Vec::new();
     for (entity, mut h) in &mut helicopters {
         if h.pilot().is_none() {
@@ -204,11 +264,24 @@ fn leave_vehicles(mut commands: Commands, mut helicopters: Query<(Entity, &mut H
             info!("player left {}", h.spec.name);
         }
     }
+    // `CarControl.Update` (exit unless `controllerJustSet`) and `EjectControllersOnExplode`.
+    for (entity, mut car) in &mut cars {
+        if car.driver().is_none() {
+            continue;
+        }
+        let eject = !car.alive();
+        let exit = car.exit;
+        if eject || car.exit_latch.update(exit) {
+            car.relinquish();
+            released.push((entity, car.disembarkment_point()));
+            info!("player left {}", car.spec.name);
+        }
+    }
     for (avatar_entity, mut avatar, piloting) in &mut avatars {
         // A vehicle that no longer exists cannot hold the avatar either.
         let point = match released.iter().find(|(v, _)| *v == piloting.vehicle) {
             Some((_, point)) => *point,
-            None if helicopters.get(piloting.vehicle).is_err() => None,
+            None if helicopters.get(piloting.vehicle).is_err() && cars.get(piloting.vehicle).is_err() => None,
             None => continue,
         };
         let p = avatar.position();

@@ -11,16 +11,17 @@
 //! * Rooms (not in the original): "Start Network Game" opens the create-room dialog (name,
 //!   password, size; `super::room`), a locked room asks for its password before joining, and
 //!   the join buttons show each room's name, size and lock;
-//! * `SendStarterEditionLinkPrompt`: the original hides its "Send Link" button on desktop
-//!   (it shared a store link to the free Starter Edition on phones). Here the button works: it
-//!   copies an invitation with the game's code (`seu2://<code>/<name>`, see `sticks_p2p`) to
-//!   the clipboard. A machine that has one on its clipboard asks that host whether the game is
-//!   open and, while it is, lists it on the connection screen next to the games heard on the
-//!   LAN; joining it connects over the internet, peer to peer. Not in the original.
+//! * `SendStarterEditionLinkPrompt`: the original hides its "Send Link" button on desktop (it
+//!   shared a store link to the free Starter Edition on phones); so does this.
+//! * Room codes (not in the original): a room's code is its host's game code (`sticks_p2p`).
+//!   The room panel shows it with Copy Room Code; "Join with Room Code" on the connection
+//!   screen takes one (typed or pasted) and joins that room over the internet, peer to peer.
+//!   A code on the clipboard is noticed too: while its host says the room is open, it is listed
+//!   on the connection screen next to the games heard on the LAN.
 
 use std::net::IpAddr;
 use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 
 use bevy::prelude::*;
 use sticks_net::{GameAddress, LobbySettings, ServerListing};
@@ -30,18 +31,22 @@ use crate::net::{Net, NetNotice, mode_index, mode_of};
 
 /// `LobbyClientDisconnection.Message`.
 pub const CONNECTION_LOST: &str = "The connection to the device hosting the game was lost.\n\nSorry :(";
-/// What the invitation link starts with.
+/// What the old invitation links started with (still understood).
 const INVITE_SCHEME: &str = "seu2://";
-/// How long the Send Link button shows its confirmation.
+/// How long Copy Room Code shows its confirmation.
 const LINK_FEEDBACK_SECONDS: f32 = 2.5;
 /// While the connection screen is up: how often the clipboard is read again, and how often an
 /// invitation's host is asked whether its game is still open.
 const CLIPBOARD_INTERVAL: f32 = 3.0;
 const PROBE_INTERVAL: f32 = 4.0;
 
-/// An invitation found on the clipboard.
+/// A room code to look for: found on the clipboard, or typed into "Join with Room Code".
 struct Invite {
     code: String,
+    /// Typed (join as soon as the room answers); a clipboard code is only listed.
+    typed: bool,
+    /// Probes the host did not answer.
+    unanswered: u32,
     /// The host's answer to the last probe: its game, while it is open.
     listing: Option<ServerListing>,
     probe: Option<Mutex<Receiver<Option<Vec<u8>>>>>,
@@ -67,10 +72,12 @@ pub(super) struct NetworkScreens {
     /// Seconds until the clipboard is read again.
     next_clipboard: f32,
     invite: Option<Invite>,
-    /// Send Link's confirmation text and how long it stays.
+    /// Copy Room Code's confirmation text and how long it stays.
     pub(super) link_feedback: Option<(String, f32)>,
-    /// The room panel is open (rather than its bar).
+    /// The online page is open (the server button).
     pub show_room: bool,
+    /// How joining with a typed room code is going (shown on the online page).
+    pub join_status: Option<String>,
     /// A dialog over the screens.
     pub dialog: Option<Dialog>,
 }
@@ -84,17 +91,30 @@ pub enum Dialog {
     Password { listing: ServerListing, success: Option<usize>, error: Option<usize>, return_to: usize },
 }
 
-/// The game code of an invitation (`seu2://<code>/DESKTOP-1`) anywhere in `text`; the name
-/// after the code is only for people (the host's probe answer names the game).
-pub fn parse_invite(text: &str) -> Option<String> {
-    let start = text.find(INVITE_SCHEME)? + INVITE_SCHEME.len();
-    let rest = text[start..].split_whitespace().next()?;
-    let code = rest.split('/').next()?;
-    sticks_p2p::is_game_code(code).then(|| code.to_owned())
+/// Status lines of the "Join with Room Code" dialog.
+pub(super) const LOOKING: &str = "Looking for the room...";
+const NOT_FOUND: &str = "No open room with that code.\nCheck it, or ask the host to make the room again.";
+const NOT_A_CODE: &str = "That is not a room code.";
+/// Unanswered probes before a typed code is given up on.
+const GIVE_UP_AFTER: u32 = 2;
+
+/// A room code in `text`: the whole text without spaces and dashes (a code as shown, in
+/// groups), a word of it, or an old invitation link (`seu2://<code>/DESKTOP-1`).
+pub fn parse_code(text: &str) -> Option<String> {
+    if let Some(start) = text.find(INVITE_SCHEME).map(|i| i + INVITE_SCHEME.len()) {
+        let code = text[start..].split_whitespace().next()?.split('/').next()?;
+        return sticks_p2p::is_game_code(code).then(|| code.to_owned());
+    }
+    let joined: String = text.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+    if sticks_p2p::is_game_code(&joined) {
+        return Some(joined);
+    }
+    text.split(|c: char| !c.is_ascii_alphanumeric()).find(|w| w.len() >= 32 && sticks_p2p::is_game_code(w)).map(str::to_owned)
 }
 
-fn invite_text(code: &str, name: &str) -> String {
-    format!("Join my Stick 'Em Up 2 game: {INVITE_SCHEME}{code}/{}", name.replace(' ', "%20"))
+/// A code as people read it: groups of eight.
+pub fn grouped(code: &str) -> String {
+    code.as_bytes().chunks(8).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(windows)]
@@ -134,33 +154,6 @@ fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
-/// Read the clipboard on a helper thread (PowerShell takes a moment to start).
-fn read_clipboard() -> Receiver<Option<String>> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        use std::process::{Command, Stdio};
-        let candidates: &[(&str, &[&str])] = if cfg!(windows) {
-            &[("powershell", &["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"])]
-        } else if cfg!(target_os = "macos") {
-            &[("pbpaste", &[])]
-        } else {
-            &[("wl-paste", &["--no-newline"]), ("xclip", &["-selection", "clipboard", "-o"]), ("xsel", &["--clipboard", "--output"])]
-        };
-        let mut out = None;
-        for (program, args) in candidates {
-            let mut command = Command::new(program);
-            command.args(*args).stdin(Stdio::null()).stderr(Stdio::null());
-            if let Ok(o) = hidden(&mut command).output() {
-                if o.status.success() {
-                    out = Some(String::from_utf8_lossy(&o.stdout).into_owned());
-                    break;
-                }
-            }
-        }
-        let _ = tx.send(out);
-    });
-    rx
-}
 
 impl Lobby {
     pub(super) fn set_button_text(&mut self, button: usize, text: &str) {
@@ -224,27 +217,31 @@ fn watch_invitations(lobby: &mut Lobby, net: &mut Net, dt: f32) {
     let screens = &mut lobby.network;
     screens.next_clipboard -= dt;
     if screens.clipboard.is_none() && screens.next_clipboard <= 0.0 {
-        screens.clipboard = Some(Mutex::new(read_clipboard()));
+        screens.clipboard = Some(Mutex::new(sticks_paper::read_clipboard()));
         screens.next_clipboard = CLIPBOARD_INTERVAL;
     }
     if let Some(rx) = &screens.clipboard {
         let received = rx.lock().ok().and_then(|rx| rx.try_recv().ok());
         if let Some(text) = received {
             screens.clipboard = None;
-            let code = text.as_deref().and_then(parse_invite);
+            let code = text.as_deref().and_then(parse_code);
             // Our own game code is never "a game on the network".
             let code = code.filter(|c| net.p2p().and_then(sticks_p2p::P2p::code).as_deref() != Some(c.as_str()));
-            match code {
-                None => screens.invite = None,
-                Some(code) if screens.invite.as_ref().is_some_and(|i| i.code == code) => {}
-                Some(code) => {
-                    info!("invitation on the clipboard: {code}");
-                    screens.invite = Some(Invite { code, listing: None, probe: None, next_probe: 0.0 });
+            // A typed code stays until its search ends, whatever the clipboard holds.
+            if !screens.invite.as_ref().is_some_and(|i| i.typed) {
+                match code {
+                    None => screens.invite = None,
+                    Some(code) if screens.invite.as_ref().is_some_and(|i| i.code == code) => {}
+                    Some(code) => {
+                        info!("room code on the clipboard: {code}");
+                        screens.invite = Some(Invite { code, typed: false, unanswered: 0, listing: None, probe: None, next_probe: 0.0 });
+                    }
                 }
             }
         }
     }
-    let Some(invite) = &mut screens.invite else { return };
+    let Some(invite) = &mut lobby.network.invite else { return };
+    let mut typed_answered = false;
     if let Some(rx) = &invite.probe {
         let answer = rx.lock().ok().and_then(|rx| rx.try_recv().ok());
         if let Some(answer) = answer {
@@ -253,6 +250,13 @@ fn watch_invitations(lobby: &mut Lobby, net: &mut Net, dt: f32) {
                 l.address = GameAddress::Online(invite.code.clone());
                 l
             });
+            if invite.listing.is_none() {
+                invite.unanswered += 1;
+            }
+            typed_answered = invite.typed;
+        }
+        if typed_answered {
+            typed_code_answered(lobby, net);
         }
         return;
     }
@@ -266,11 +270,72 @@ fn watch_invitations(lobby: &mut Lobby, net: &mut Net, dt: f32) {
     }
 }
 
+/// "Join with Room Code": look for the room of `text`'s code; it is joined when its host answers
+/// (`typed_code_answered`).
+pub(super) fn start_code_search(lobby: &mut Lobby, net: &Net, text: &str) {
+    let Some(code) = parse_code(text) else {
+        lobby.network.join_status = Some(NOT_A_CODE.to_owned());
+        return;
+    };
+    if net.current_game_code().as_deref() == Some(code.as_str()) {
+        lobby.network.join_status = Some("That is this computer's own code.".to_owned());
+        return;
+    }
+    info!("looking for room {code}");
+    lobby.network.invite = Some(Invite { code, typed: true, unanswered: 0, listing: None, probe: None, next_probe: 0.0 });
+    lobby.network.join_status = Some(LOOKING.to_owned());
+}
+
+/// The host of a typed code answered a probe (or did not): join its room (asking for the
+/// password of a locked one), or say it was not found.
+fn typed_code_answered(lobby: &mut Lobby, net: &mut Net) {
+    let Some(invite) = &lobby.network.invite else { return };
+    if !lobby.network.show_room {
+        // Closed: the code is no longer looked for.
+        lobby.network.invite = None;
+        lobby.network.join_status = None;
+        return;
+    }
+    match invite.listing.clone() {
+        Some(listing) => {
+            let Some(s) = lobby.named_script("NetworkSetup").cloned() else { return };
+            let next = lobby.scene.field_object(&s, "nextScreen");
+            let error = lobby.scene.field_object(&s, "serverVersionMismatchErrorScreen");
+            lobby.network.invite = None;
+            lobby.network.join_status = None;
+            lobby.network.show_room = false;
+            join(lobby, net, &listing, next, error, s.object);
+        }
+        None if invite.unanswered >= GIVE_UP_AFTER => {
+            lobby.network.invite = None;
+            lobby.network.join_status = Some(NOT_FOUND.to_owned());
+        }
+        None => {}
+    }
+}
+
+/// The online page was closed: stop looking for a typed code.
+pub(super) fn cancel_code_search(lobby: &mut Lobby) {
+    if lobby.network.invite.as_ref().is_some_and(|i| i.typed) {
+        lobby.network.invite = None;
+    }
+    lobby.network.join_status = None;
+}
+
+/// The online page's "Create a Room": the original's "Start Network Game" (the create-room
+/// dialog, then the screen after the title).
+pub(super) fn open_create_room(lobby: &mut Lobby) {
+    let Some(s) = lobby.named_script("NetworkSetup").cloned() else { return };
+    let (next, failed_label) = (lobby.scene.field_object(&s, "nextScreen"), lobby.scene.field_object(&s, "connectToWiFiLabel"));
+    lobby.network.dialog = Some(Dialog::CreateRoom { next, failed_label });
+}
+
 /// `NetworkSetup.Update`.
 fn connection_screen(lobby: &mut Lobby, net: &mut Net, dt: f32) {
     let Some(s) = lobby.named_script("NetworkSetup").cloned() else { return };
     let listing_screen_up = lobby.active_in_hierarchy(s.object) || lobby.named_script("ServerList").is_some_and(|l| lobby.active_in_hierarchy(l.object));
-    if listing_screen_up && net.is_offline() && !crate::settings::original_only() {
+    // The title and server list watch the clipboard for codes; the online page looks for a typed one.
+    if (listing_screen_up || lobby.network.show_room) && net.is_offline() && !crate::settings::original_only() {
         watch_invitations(lobby, net, dt);
     } else {
         // Read again as soon as a listing screen comes up.
@@ -359,7 +424,8 @@ fn lobby_ender(lobby: &mut Lobby, net: &Net) {
 }
 
 /// `SendStarterEditionLinkPrompt.Update`: the labels follow `NetworkUtility.Offline`; the
-/// button (hidden by the original on desktop) shows the result of its last press for a moment.
+/// button stays hidden, as the original hides it on desktop (it linked to the phones' Starter
+/// Edition). Rooms are shared with their code instead (`copy_room_code`).
 fn send_link_prompt(lobby: &mut Lobby, net: &Net, dt: f32) {
     let Some(s) = lobby.named_script("SendStarterEditionLinkPrompt").cloned() else { return };
     let offline = net.is_offline();
@@ -369,48 +435,40 @@ fn send_link_prompt(lobby: &mut Lobby, net: &Net, dt: f32) {
     if let Some(o) = lobby.scene.field_object(&s, "networkGameLabel") {
         lobby.active[o] = !offline;
     }
-    let Some(button) = lobby.scene.field_object(&s, "sendLinkButton") else { return };
-    if crate::settings::original_only() {
-        // The original hides it on desktop (it linked to the phones' Starter Edition).
+    if let Some(button) = lobby.scene.field_object(&s, "sendLinkButton") {
         lobby.active[button] = false;
-        return;
     }
-    lobby.active[button] = true;
-    let text = match &mut lobby.network.link_feedback {
-        Some((text, left)) => {
-            *left -= dt;
-            let shown = text.clone();
-            if *left <= 0.0 {
-                lobby.network.link_feedback = None;
-            }
-            shown
+    if let Some((_, left)) = &mut lobby.network.link_feedback {
+        *left -= dt;
+        if *left <= 0.0 {
+            lobby.network.link_feedback = None;
         }
-        None => "Send Link".to_owned(),
-    };
-    lobby.set_button_text(button, &text);
+    }
 }
 
-/// The Send Link button: an invitation to this game on the clipboard, for a friend anywhere.
-pub(super) fn send_link(lobby: &mut Lobby, net: &mut Net) {
-    let code = if net.is_host() {
-        net.game_code()
+/// This room's code: the host's game code (a client knows it when it joined with one).
+pub(super) fn room_code(net: &Net) -> Option<String> {
+    if net.is_host() {
+        net.current_game_code()
     } else {
         match &net.host_address {
             Some(GameAddress::Online(code)) => Some(code.clone()),
             _ => None,
         }
-    };
-    let feedback = match code {
-        None if net.is_offline() => "Start a network game first".to_owned(),
+    }
+}
+
+/// Copy Room Code: the code on the clipboard, for a friend anywhere.
+pub(super) fn copy_room_code(lobby: &mut Lobby, net: &mut Net) {
+    let feedback = match room_code(net) {
         None if net.is_host() => "Not online yet, try again".to_owned(),
-        None => "Ask the host for the link".to_owned(),
+        None => "Joined on the LAN: no code".to_owned(),
         Some(code) => {
-            let text = invite_text(&code, &crate::net::machine_name());
-            if copy_to_clipboard(&text) {
-                info!("copied to the clipboard: {text}");
-                if net.is_host() && !net.is_online() { "Link copied (getting online…)".to_owned() } else { "Link copied!".to_owned() }
+            if copy_to_clipboard(&code) {
+                info!("room code copied: {code}");
+                if net.is_host() && !net.is_online() { "Copied (getting online...)".to_owned() } else { "Code copied!".to_owned() }
             } else {
-                warn!("no clipboard tool; the invitation is: {text}");
+                warn!("no clipboard tool; the room code is: {code}");
                 "No clipboard: see the log".to_owned()
             }
         }
@@ -538,12 +596,6 @@ pub(super) fn press(lobby: &mut Lobby, net: &mut Net, object: usize) -> bool {
             return true;
         }
     }
-    if let Some(s) = lobby.named_script("SendStarterEditionLinkPrompt").cloned() {
-        if lobby.scene.field_object(&s, "sendLinkButton") == Some(object) {
-            send_link(lobby, net);
-            return true;
-        }
-    }
     false
 }
 
@@ -615,14 +667,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invitations_round_trip() {
+    fn room_codes() {
         // The Ed25519 base point: a valid public key.
         let code = "5866666666666666666666666666666666666666666666666666666666666666";
-        let text = invite_text(code, "MY PC");
-        assert_eq!(parse_invite(&format!("hey, {text} see you")).as_deref(), Some(code));
-        assert_eq!(parse_invite(&format!("seu2://{code}")).as_deref(), Some(code));
-        // The old LAN-address invitations and garbage are not games.
-        assert!(parse_invite("seu2://192.168.1.20:25790/DESKTOP-1").is_none());
-        assert!(parse_invite("nothing here").is_none());
+        assert_eq!(parse_code(code).as_deref(), Some(code));
+        assert_eq!(parse_code(&format!("  {}\n", grouped(code))).as_deref(), Some(code));
+        assert_eq!(parse_code(&format!("my code is {code} ok")).as_deref(), Some(code));
+        assert_eq!(parse_code(&format!("seu2://{code}/MY%20PC")).as_deref(), Some(code));
+        assert!(parse_code("seu2://192.168.1.20:25790/DESKTOP-1").is_none());
+        assert!(parse_code("nothing here").is_none());
     }
 }

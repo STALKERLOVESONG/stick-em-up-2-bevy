@@ -161,6 +161,16 @@ pub struct Level {
     pub tips: Option<Vec<LevelTip>>,
     /// The "Versus Game Ender" (versus levels).
     pub versus_ender: Option<VersusEnder>,
+    /// `TimeLimit` (Moon Race): the finish trigger's object and `timeLimit` in seconds.
+    pub time_limit: Option<(FileId, f32)>,
+    /// `Wave`s (Pirates).
+    pub waves: Vec<crate::scenery::WaveSpec>,
+    /// Active, enabled `MinimumCameraDistanceChanger`s: world x and `distance`, sorted by x.
+    pub distance_changers: Vec<(f32, f32)>,
+    /// `CarControl` vehicles.
+    pub cars: Vec<crate::vehicles::CarSpawn>,
+    /// `GravityChanger.gravity` (the Moon levels): `Physics2D.gravity` while the level is loaded.
+    pub gravity: Option<[f32; 2]>,
 }
 
 /// What `AllClientControlTypes` reports offline with the keyboard and mouse as the only input
@@ -562,6 +572,9 @@ fn colliders_of(go: &GameObject<'_>, scripts: &ScriptIndex, out: &mut Vec<Collid
                         .map(|(x, y)| xy(world.transform_point([x + offset.0, y + offset.1, 0.0])))
                         .collect();
                     if pts.len() >= 3 {
+                        // The object's own renderer, else one elsewhere that names this collider
+                        // (the Moon levels draw `Ground` from a `Base Visual` child).
+                        let renderer = renderer.or_else(|| renderer_naming(go, comp.file_id, scripts));
                         let surface = renderer.and_then(|r| {
                             let material = r.get("material")?.guid()?.to_owned();
                             let pair = |k: &str, default: f32| {
@@ -624,6 +637,22 @@ fn colliders_of(go: &GameObject<'_>, scripts: &ScriptIndex, out: &mut Vec<Collid
             _ => {}
         }
     }
+}
+
+/// An enabled `PolygonColliderRenderer` on an active object other than `go` whose `collider`
+/// field is the collider component `collider`.
+fn renderer_naming<'a>(go: &GameObject<'a>, collider: FileId, scripts: &ScriptIndex) -> Option<&'a Value> {
+    let scene = go.scene();
+    scene.documents().find_map(|doc| {
+        if doc.class_id != class::MONO_BEHAVIOUR || doc.body.get("collider").and_then(Value::file_id) != Some(collider) {
+            return None;
+        }
+        if script_name(doc, scripts)? != "PolygonColliderRenderer" || !doc.body.bool_of("m_Enabled").unwrap_or(true) {
+            return None;
+        }
+        let owner = scene.game_object(doc.body.get("m_GameObject")?.file_id()?)?;
+        (owner.id() != go.id() && owner.active_in_hierarchy()).then_some(&doc.body)
+    })
 }
 
 /// Extract the gameplay-relevant parts of a parsed level scene.
@@ -782,6 +811,25 @@ pub fn extract_level_with(name: &str, scene: &Scene, scripts: &ScriptIndex, cont
         enders,
         tips,
         versus_ender: versus_ender(scene, scripts),
+        waves: crate::scenery::waves(scene, scripts),
+        cars: crate::vehicles::cars(scene, scripts),
+        distance_changers: {
+            let mut changers: Vec<(f32, f32)> = objects
+                .iter()
+                .filter(|go| go.active_in_hierarchy())
+                .filter_map(|go| mono_fields(go, scripts, "MinimumCameraDistanceChanger").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).map(|b| (go.world_affine().t[0], b.f32_of("distance").unwrap_or(0.0))))
+                .collect();
+            changers.sort_by(|a, b| a.0.total_cmp(&b.0));
+            changers
+        },
+        time_limit: objects
+            .iter()
+            .filter(|go| go.active_in_hierarchy())
+            .find_map(|go| mono_fields(go, scripts, "TimeLimit").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).map(|b| (go.id(), b.f32_of("timeLimit").unwrap_or(60.0)))),
+        gravity: objects
+            .iter()
+            .filter(|go| go.active_in_hierarchy())
+            .find_map(|go| mono_fields(go, scripts, "GravityChanger").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).and_then(|b| b.get("gravity")?.as_vec2()).map(|(x, y)| [x, y])),
     }
 }
 

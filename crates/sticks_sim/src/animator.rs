@@ -180,6 +180,12 @@ impl Animator {
         *self = Animator::new(self.model.clone());
     }
 
+    /// `Animator.Play(state)`: jump to `state` at its start, dropping any transition.
+    pub fn play(&mut self, state: usize) {
+        self.current = Playhead { state, time: 0.0 };
+        self.fade = None;
+    }
+
     pub fn set_float(&mut self, id: ParamId, value: f32) {
         self.params[id] = value;
     }

@@ -10,3 +10,6 @@ publish.workspace = true
 bevy = { version = "0.19", features = ["wav"] }
 sticks_paper = { path = "../sticks_paper" }
 sticks_sim = { path = "../sticks_sim" }
+
+[build-dependencies]
+exe_icon = { path = "../exe_icon" }

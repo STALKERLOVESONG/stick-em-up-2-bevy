@@ -22,6 +22,11 @@
 //!   `VersusScoreUI` frags label in Versus, and in Team Versus the `Team Info` panels
 //!   (`TeamVersusScoreUI`) show each team's frags.
 //!
+//! * The level's own UI-layer objects (Moon Race's "Timing UI", Office's "Enemies Remaining
+//!   UI") are seen by the same UI camera: they are grafted into the HUD scene when the level
+//!   loads (`InteractiveScene::graft`) and drawn with it; `LayoutControls` stacks their active
+//!   children and `TimerUI` writes minutes, seconds and milliseconds (`level_end` drives them).
+//!
 //! TODO: the off-screen `Pointers` (`Pointer.Get(PlayerIndex)`, coloured in `Player.SetUp`) are
 //! not drawn.
 
@@ -179,9 +184,35 @@ pub(crate) struct HudScene {
     team_info: Option<usize>,
     queue: DrawQueue,
     pool: Vec<(Entity, Handle<Mesh>)>,
+    /// The level's grafted UI-layer objects by their file id in the level scene.
+    pub level_ui: HashMap<unity_data::scene::FileId, usize>,
+    /// `LayoutControls`: the object and its child spacing (`Awake`: child 1 − child 0).
+    layouts: Vec<(usize, [f32; 3])>,
+    /// `TimerUI`: its object → the minutes, seconds and milliseconds texts.
+    timers: HashMap<usize, [Option<usize>; 3]>,
 }
 
 impl HudScene {
+    /// `TimerUI.TimeInSeconds`: `TimeSpan.FromSeconds` (rounded to the millisecond, as .NET
+    /// does) split into minutes `0`, seconds `00` and milliseconds `000`.
+    pub fn set_timer(&mut self, timer: usize, seconds: f32) {
+        let Some(&[minutes, secs, millis]) = self.timers.get(&timer) else { return };
+        let total = (f64::from(seconds) * 1000.0 + if seconds >= 0.0 { 0.5 } else { -0.5 }).trunc() as i64;
+        let ms = total.rem_euclid(1000);
+        let s = (total / 1000).rem_euclid(60);
+        let m = (total / 60_000).rem_euclid(60);
+        for (object, text) in [(minutes, m.to_string()), (secs, format!("{s:02}")), (millis, format!("{ms:03}"))] {
+            if let Some(o) = object {
+                self.set_text(o, &text);
+            }
+        }
+    }
+
+    /// `GetComponentInChildren<TimerUI>()` under `object` (itself first).
+    pub fn timer_in(&self, object: usize) -> Option<usize> {
+        self.descendants(object).into_iter().find(|o| self.timers.contains_key(o))
+    }
+
     fn descendants(&self, root: usize) -> Vec<usize> {
         let mut out = vec![root];
         let mut i = 0;
@@ -287,6 +318,7 @@ impl Plugin for HudPlugin {
 pub(crate) fn load_hud(
     mut commands: Commands,
     config: Res<GameConfig>,
+    source: Res<crate::level::LevelSource>,
     asset_server: Res<AssetServer>,
     mut textures: ResMut<UnityTextures>,
     mut materials: ResMut<Assets<UnityLitMaterial>>,
@@ -302,13 +334,49 @@ pub(crate) fn load_hud(
         Node { position_type: PositionType::Absolute, left: Val::Px(16.0), bottom: Val::Px(12.0), ..default() },
         Visibility::Hidden,
     ));
-    let scene = match load_interactive_scene(&config.export_root, "Assets/Game/Permanent System.unity") {
+    let mut scene = match load_interactive_scene(&config.export_root, "Assets/Game/Permanent System.unity") {
         Ok(scene) => scene,
         Err(e) => {
             error!("Permanent System.unity: {e}; no HUD");
             return;
         }
     };
+    // The level's own root objects on layer 5 ("UI"): drawn by the same UI camera.
+    let mut level_ui = HashMap::new();
+    let mut level_roots = Vec::new();
+    let mut layouts = Vec::new();
+    let mut timers = HashMap::new();
+    match load_interactive_scene(&config.export_root, &source.0) {
+        Ok(level_scene) => {
+            let roots: Vec<usize> = (0..level_scene.objects.len()).filter(|&i| level_scene.objects[i].parent.is_none() && level_scene.objects[i].layer == 5).collect();
+            let map = scene.graft(&level_scene, &roots);
+            for (&old, &new) in &map {
+                level_ui.insert(level_scene.objects[old].id, new);
+            }
+            level_roots = roots.iter().filter_map(|r| map.get(r).copied()).collect();
+            for s in level_scene.scripts.iter().filter(|s| s.enabled && map.contains_key(&s.object)) {
+                let object = map[&s.object];
+                match s.class.as_str() {
+                    "LayoutControls" => {
+                        let children = &level_scene.objects[s.object].children;
+                        if let (Some(&a), Some(&b)) = (children.first(), children.get(1)) {
+                            let (pa, pb) = (level_scene.objects[a].local_position, level_scene.objects[b].local_position);
+                            layouts.push((object, [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]]));
+                        }
+                    }
+                    "TimerUI" => {
+                        let text = |field: &str| level_scene.field_object(s, field).and_then(|o| map.get(&o).copied());
+                        timers.insert(object, [text("minutes"), text("seconds"), text("milliseconds")]);
+                    }
+                    _ => {}
+                }
+            }
+            if !level_roots.is_empty() {
+                info!("HUD: {} UI object(s) from the level", map.len());
+            }
+        }
+        Err(e) => warn!("{}: {e}; no level UI", source.0),
+    }
     let find = |name: &str| scene.objects.iter().position(|o| o.name == name);
     let (Some(player_info), Some(ui_camera)) = (find("Player Info"), find("UI Camera")) else {
         error!("Permanent System.unity has no Player Info / UI Camera; no HUD");
@@ -346,13 +414,19 @@ pub(crate) fn load_hud(
         team_info,
         queue: DrawQueue::default(),
         pool: Vec::new(),
+        level_ui,
+        layouts,
+        timers,
         scene,
     };
     let mut subtree = hud.descendants(player_info);
     if let Some(t) = team_info {
         subtree.extend(hud.descendants(t));
     }
-    let menus = in_game_ui.map(|root| hud.descendants(root)).unwrap_or_default();
+    let mut menus = in_game_ui.map(|root| hud.descendants(root)).unwrap_or_default();
+    for &root in &level_roots {
+        menus.extend(hud.descendants(root));
+    }
     subtree.extend(menus.iter().copied());
     for sprite in &hud.scene.sprites {
         let Some(object) = hud.scene.object_of(sprite.object) else { continue };
@@ -754,6 +828,17 @@ fn layout_hud(mut hud: ResMut<HudScene>, windows: Query<&Window, With<PrimaryWin
     }
     hud.ortho = ortho;
     hud.aspect = aspect;
+    // `LayoutControls.LateUpdate`: active children one spacing apart.
+    for i in 0..hud.layouts.len() {
+        let (object, offset) = hud.layouts[i];
+        let mut at = [0.0f32; 3];
+        for child in hud.scene.objects[object].children.clone() {
+            if hud.active[child] {
+                hud.local_position[child] = at;
+                at = [at[0] + offset[0], at[1] + offset[1], at[2] + offset[2]];
+            }
+        }
+    }
 
     // `ViewportAnchor.Update`: `camera.ViewportToWorldPoint(point, z)` of the orthographic camera.
     // Parents first (`Player Info`'s players under nothing anchored; the menus under `In-Game UI`).

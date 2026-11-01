@@ -99,6 +99,10 @@ pub struct FlatSpriteInstance {
     pub flipped: bool,
     /// Roll in degrees about the view axis (the bone's `eulerAngles.z`).
     pub roll_degrees: f32,
+    /// A further local rotation `(x, y, z, w)` applied before the roll: a projectile's sprite
+    /// halves are tilted out of the view plane (the Rocket's top and bottom by ±15° about x), so
+    /// the light shades them differently. [`NO_TILT`] for everything else.
+    pub tilt: [f32; 4],
     pub scale: [f32; 3],
     pub color: [f32; 4],
     pub shadow_plane_z: f32,
@@ -108,6 +112,9 @@ pub struct FlatSpriteInstance {
     pub shadow_offset: [f32; 2],
     pub shadow_scale: f32,
 }
+
+/// [`FlatSpriteInstance::tilt`] of a sprite lying in the view plane.
+pub const NO_TILT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// Lines and sprites to draw for one character this frame.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -206,6 +213,7 @@ impl CharacterRigModel {
                     position,
                     flipped: euler.y >= 90.0 && euler.y < 270.0,
                     roll_degrees: euler.z,
+                    tilt: NO_TILT,
                     scale: sprite.scale,
                     color,
                     shadow_plane_z: sprite.shadow_plane_z,
@@ -382,6 +390,9 @@ pub struct SpriteArt {
     /// The full definitions (double-sided sprites carry a back quad).
     pub def: unity_data::sprites::SpriteDef,
     pub shadow_def: Option<unity_data::sprites::SpriteDef>,
+    /// The atlas (queue texture id) when it is not the art's own: a sprite borrowed from another
+    /// level's collection (a weapon the level does not have, given by the All Weapons cheat).
+    pub texture: Option<u32>,
 }
 
 impl SpriteArt {
@@ -390,7 +401,7 @@ impl SpriteArt {
         let quad = SpriteQuad::of(def)?;
         let shadow_def = collection.sprite(&format!("{name} shadow")).cloned();
         let shadow = shadow_def.as_ref().and_then(SpriteQuad::of);
-        Some(SpriteArt { name: name.to_owned(), quad, shadow, def: def.clone(), shadow_def })
+        Some(SpriteArt { name: name.to_owned(), quad, shadow, def: def.clone(), shadow_def, texture: None })
     }
 }
 
@@ -434,6 +445,45 @@ impl VisualArt {
         self.line_uvs
     }
 
+    /// Art without lines or sprites, drawing lines with `line_uvs` (another art's).
+    pub fn empty(line_uvs: [[f32; 2]; 8]) -> VisualArt {
+        VisualArt { line_uvs, sprites: Vec::new() }
+    }
+
+    /// Add one sprite from its definitions (its "<name> shadow" copy optional), drawn with atlas
+    /// `texture`; a name already present is kept.
+    pub fn add_def(&mut self, def: &unity_data::sprites::SpriteDef, shadow: Option<&unity_data::sprites::SpriteDef>, texture: u32) {
+        if self.sprite(&def.name).is_some() {
+            return;
+        }
+        let Some(quad) = SpriteQuad::of(def) else { return };
+        self.sprites.push(SpriteArt { name: def.name.clone(), quad, shadow: shadow.and_then(SpriteQuad::of), def: def.clone(), shadow_def: shadow.cloned(), texture: Some(texture) });
+    }
+
+    /// The `names` this art has no sprite for.
+    pub fn missing<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+        let mut out: Vec<&str> = names.into_iter().filter(|n| self.sprite(n).is_none()).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Collect `names` from another collection drawn with atlas `texture`; unknown names are
+    /// skipped. Returns how many were added.
+    pub fn borrow_sprites<'a>(&mut self, collection: &unity_data::sprites::SpriteCollection, names: impl IntoIterator<Item = &'a str>, texture: u32) -> usize {
+        let mut added = 0;
+        for name in names {
+            if self.sprite(name).is_some() {
+                continue;
+            }
+            let Some(mut art) = SpriteArt::of(collection, name) else { continue };
+            art.texture = Some(texture);
+            self.sprites.push(art);
+            added += 1;
+        }
+        added
+    }
+
     /// Also collect `names` (projectile sprites, say) from the collection; unknown names are
     /// skipped.
     pub fn add_sprites<'a>(&mut self, collection: &unity_data::sprites::SpriteCollection, names: impl IntoIterator<Item = &'a str>) {
@@ -462,7 +512,6 @@ pub fn projectile_visual(
         let local = Vec3::new(sprite.position[0], sprite.position[1], sprite.position[2]);
         let world = turn * local;
         let at = Vec3::new(position.x + world.x, position.y + world.y, spawn_z + world.z);
-        let local_roll = Quat::from_array(sprite.rotation).euler_angles_degrees().z;
         let (shadow_offset, shadow_scale) = match light {
             Some(light) => shadow_offset_and_scale(light, at, sprite.shadow_plane_z),
             None => ([0.0, 0.0], 1.0),
@@ -472,7 +521,9 @@ pub fn projectile_visual(
             sprite_name: sprite.sprite_name.clone(),
             position: at,
             flipped: false,
-            roll_degrees: angle_degrees + local_roll,
+            // The projectile's turn, then the sprite's own local rotation (whole, tilt included).
+            roll_degrees: angle_degrees,
+            tilt: sprite.rotation,
             scale: sprite.scale,
             color: sprite.color,
             shadow_plane_z: sprite.shadow_plane_z,
@@ -517,11 +568,33 @@ enum Piece<'a> {
 }
 
 impl CharacterVisual {
+    /// The figure moved `dz` along the view axis with its shadow planes, as `VehicleOccupant.Awake`
+    /// does for a seated figure (its `LinesToChildren` and `FlatSprite` planes are raised by how
+    /// far the seat is from the usual `z = -0.1`), so the shadows fall as they do on foot.
+    pub fn shifted_z(mut self, dz: f32) -> CharacterVisual {
+        for line in self.shadows.iter_mut().chain(self.lines.iter_mut()) {
+            line.a.z += dz;
+            line.b.z += dz;
+            line.shadow_plane_z += dz;
+        }
+        for sprite in &mut self.sprites {
+            sprite.position.z += dz;
+            sprite.shadow_plane_z += dz;
+        }
+        self
+    }
+
     /// The figure as the original's renderers, each to be sorted on its own in the transparent
     /// queue ([`crate::draw`]): first the `LinesRenderer` mesh (every shadow line, then every
     /// line, in the order they were added), then for each `FlatSprite` its `tk2dSprite` and the
     /// `SpriteShadower` copy.
     pub fn renderers(&self, art: &VisualArt) -> Vec<crate::draw::Geometry> {
+        self.renderers_textured(art).into_iter().map(|(_, g)| g).collect()
+    }
+
+    /// [`Self::renderers`] with each piece's atlas when it is not the art's own
+    /// ([`SpriteArt::texture`]).
+    pub fn renderers_textured(&self, art: &VisualArt) -> Vec<(Option<u32>, crate::draw::Geometry)> {
         use crate::draw::{BACK, Geometry, SHADOW_DEPTH, color32, sprite_geometry};
         let mut out = Vec::new();
         let mut lines = Geometry::default();
@@ -534,22 +607,23 @@ impl CharacterVisual {
             lines.colors.extend([color32(color32_to_f32(line.color)); 8]);
             lines.indices.extend(LINE_TRIANGLES.iter().map(|i| base + i));
         }
-        out.push(lines);
+        out.push((None, lines));
         for sprite in &self.sprites {
             let Some(sprite_art) = art.sprite(&sprite.sprite_name) else { continue };
+            let texture = sprite_art.texture;
             // `FlatSprite.LateUpdate`: `localEulerAngles = (0, flip ? 180 : 0, roll)`.
-            let turn = Quat::euler_y_degrees(if sprite.flipped { 180.0 } else { 0.0 }) * Quat::about_z(sprite.roll_degrees.to_radians());
+            let turn = Quat::euler_y_degrees(if sprite.flipped { 180.0 } else { 0.0 }) * Quat::about_z(sprite.roll_degrees.to_radians()) * Quat::from_array(sprite.tilt);
             let rotation = (turn.x, turn.y, turn.z, turn.w);
             let p = sprite.position;
             let world = unity_data::math::Affine::from_trs([p.x, p.y, p.z], rotation, [1.0; 3]);
-            out.push(sprite_geometry(&sprite_art.def, sprite.scale, sprite.color, &world));
+            out.push((texture, sprite_geometry(&sprite_art.def, sprite.scale, sprite.color, &world)));
             if let Some(shadow) = &sprite_art.shadow_def {
                 // The copy's local position is the world offset turned into the sprite's frame,
                 // so in the world it is exactly that offset; it inherits the turn.
                 let at = [p.x + sprite.shadow_offset[0], p.y + sprite.shadow_offset[1], p.z + SHADOW_DEPTH];
                 let world = unity_data::math::Affine::from_trs(at, rotation, [1.0; 3]);
                 let k = sprite.shadow_scale;
-                out.push(sprite_geometry(shadow, [sprite.scale[0] * k, sprite.scale[1] * k, 1.0], [0.0, 0.0, 0.0, sprite.color[3]], &world));
+                out.push((texture, sprite_geometry(shadow, [sprite.scale[0] * k, sprite.scale[1] * k, 1.0], [0.0, 0.0, 0.0, sprite.color[3]], &world)));
             }
         }
         out
@@ -590,7 +664,7 @@ impl CharacterVisual {
                     let Some(sprite_art) = art.sprite(&sprite.sprite_name) else { continue };
                     // `tk2dSprite`: vertices scaled, then the sprite object's turn (flip about Y,
                     // roll about Z) and translation.
-                    let turn = Quat::euler_y_degrees(if sprite.flipped { 180.0 } else { 0.0 }) * Quat::about_z(sprite.roll_degrees.to_radians());
+                    let turn = Quat::euler_y_degrees(if sprite.flipped { 180.0 } else { 0.0 }) * Quat::about_z(sprite.roll_degrees.to_radians()) * Quat::from_array(sprite.tilt);
                     let (quad, scale, offset, color) = if shadow {
                         let quad = sprite_art.shadow.as_ref().unwrap_or(&sprite_art.quad);
                         let k = sprite.shadow_scale;

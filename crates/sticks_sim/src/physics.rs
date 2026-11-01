@@ -892,6 +892,16 @@ pub struct StepReport {
 }
 
 impl Body {
+    /// The trigger colliders the body's shape overlaps where it is now (no step), sorted.
+    pub fn overlapping_triggers(&self, world: &World, rules: &PhysicsRules) -> Vec<u32> {
+        let mut found = Vec::new();
+        self.gather(world, rules, self.position, false, &mut found);
+        let mut ids: Vec<u32> = found.iter().filter(|c| c.depth > 0.0).map(|c| c.collider).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     fn gather(&self, world: &World, rules: &PhysicsRules, position: Vec2, solid: bool, out: &mut Vec<Contact>) {
         let mut probe_pts = Vec::new();
         for c in &self.shape.circles {
@@ -903,6 +913,9 @@ impl Body {
             let p = position + b.offset;
             probe_pts.push(p - b.half_extents);
             probe_pts.push(p + b.half_extents);
+        }
+        for poly in &self.shape.polygons {
+            probe_pts.extend(poly.iter().map(|v| position + *v));
         }
         if probe_pts.is_empty() {
             return;
@@ -933,6 +946,12 @@ impl Body {
                 let h = b.half_extents;
                 let quad = [p + Vec2::new(-h.x, -h.y), p + Vec2::new(h.x, -h.y), p + Vec2::new(h.x, h.y), p + Vec2::new(-h.x, h.y)];
                 if let Some(m) = convex_vs_piece(&quad, &entry.piece) {
+                    push(m);
+                }
+            }
+            for poly in &self.shape.polygons {
+                let placed: Vec<Vec2> = poly.iter().map(|v| position + *v).collect();
+                if let Some(m) = convex_vs_piece(&placed, &entry.piece) {
                     push(m);
                 }
             }

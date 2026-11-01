@@ -65,6 +65,7 @@ pub fn prop_sprite(name: &str, world: &Affine, rotation: [f32; 4], scale: [f32; 
         position,
         flipped: forward_z < 0.0,
         roll_degrees: roll,
+        tilt: crate::visual::NO_TILT,
         scale,
         color,
         shadow_plane_z,

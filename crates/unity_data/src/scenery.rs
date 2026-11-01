@@ -64,6 +64,40 @@ pub struct Scroller {
     pub x: f32,
 }
 
+/// `Wave` (Pirates' water): its sprite slides along `velocity.x` and bobs, wrapping every sprite
+/// size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WaveSpec {
+    /// The object with the `Wave` and its `tk2dSprite`.
+    pub object: FileId,
+    pub velocity: [f32; 2],
+    pub oscillation_amplitude: f32,
+    /// The parent's world scale (the local movement in world units).
+    pub parent_scale: [f32; 2],
+}
+
+/// Every active, enabled `Wave`.
+pub fn waves(scene: &Scene, scripts: &ScriptIndex) -> Vec<WaveSpec> {
+    scene
+        .game_objects()
+        .into_iter()
+        .filter(|go| go.active_in_hierarchy())
+        .filter_map(|go| {
+            let b = &mono(&go, scripts, "Wave")?.body;
+            if !b.bool_of("m_Enabled").unwrap_or(true) {
+                return None;
+            }
+            let scale = go.parent().map_or([1.0; 3], |p| p.world_affine().lossy_scale());
+            Some(WaveSpec {
+                object: go.id(),
+                velocity: b.get("velocity").and_then(Value::as_vec2).map_or([-1.0, 0.16], |(x, y)| [x, y]),
+                oscillation_amplitude: b.f32_of("oscillationAmplitude").unwrap_or(0.7),
+                parent_scale: [scale[0], scale[1]],
+            })
+        })
+        .collect()
+}
+
 /// A breakable level object: `Health` → `ExplodeOnHealthExhausted` → `Explodable.Explode` →
 /// `ExplodeSpritesAndLines` (its sprites fly apart), `PlaySoundOnExplode`, and
 /// `DestroyOnExplosionFinished`.

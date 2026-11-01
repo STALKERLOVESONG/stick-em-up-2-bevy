@@ -2,9 +2,12 @@
 //! git-ignored; see the game's `build.rs`). The launcher offers them when that file is here too.
 
 fn main() {
+    // The original game's icon (from the player's SEU2.exe), else the remake's drawn one.
+    exe_icon::link_icon(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packaging/icons/launcher.res")));
     println!("cargo::rustc-check-cfg=cfg(game_hacks)");
     println!("cargo::rerun-if-changed=../sticks_game/src/hacks.rs");
     if std::path::Path::new("../sticks_game/src/hacks.rs").exists() {
         println!("cargo::rustc-cfg=game_hacks");
     }
 }
+

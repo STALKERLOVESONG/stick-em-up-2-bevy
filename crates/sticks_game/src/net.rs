@@ -292,6 +292,11 @@ impl Net {
         self.p2p().and_then(P2p::code)
     }
 
+    /// This machine's game code if internet play has started (never starts it).
+    pub fn current_game_code(&self) -> Option<String> {
+        self.p2p.as_ref().and_then(P2p::code)
+    }
+
     /// Whether other machines can find this one on the internet yet.
     pub fn is_online(&self) -> bool {
         self.p2p.as_ref().is_some_and(P2p::is_online)

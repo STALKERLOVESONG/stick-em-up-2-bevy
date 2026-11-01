@@ -152,6 +152,10 @@ pub struct HelicopterSpawn {
     pub respawns: bool,
     /// The root's `AudioSource` (the engine loop).
     pub engine_sound: Option<LoopingSound>,
+    /// `ExplodeSpritesAndLines.fadeWaitTime` on the root (none: `Explodable.Finished` at once).
+    pub explosion_fade_wait: Option<f32>,
+    /// `PlaySoundOnExplode.sound`.
+    pub explode_sound: Option<String>,
 }
 
 impl HelicopterSpawn {
@@ -383,6 +387,226 @@ pub fn helicopters(scene: &Scene, scripts: &ScriptIndex) -> Vec<HelicopterSpawn>
             target,
             respawns: script(&root, scripts, "RespawnerInstantiator").is_some() && !removes_player_parts,
             engine_sound,
+            explosion_fade_wait: script(&root, scripts, "ExplodeSpritesAndLines").map(|d| d.body.f32_of("fadeWaitTime").unwrap_or(2.0)),
+            explode_sound: script(&root, scripts, "PlaySoundOnExplode").and_then(|d| d.body.str_of("sound")).filter(|s| !s.is_empty()).map(str::to_owned),
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cars (`CarControl`: Moon, Moon Race, Corruption 2)
+// ---------------------------------------------------------------------------------------------
+
+/// A `WheelJoint2D` on a car root with the wheel body it connects.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarWheel {
+    /// The wheel object (its own `Rigidbody2D` and `CircleCollider2D`; a child of the car).
+    pub node: usize,
+    pub body: RigidbodySpec,
+    pub radius: f32,
+    /// `CircleCollider2D.m_Offset` in the wheel's space.
+    pub offset: [f32; 2],
+    /// `PhysicsMaterial2D` friction of the wheel's collider (GUID; `None`: the default 0.4).
+    pub material: Option<String>,
+    /// `m_Anchor` (car space) and `m_ConnectedAnchor` (wheel space).
+    pub anchor: [f32; 2],
+    pub connected_anchor: [f32; 2],
+    /// `m_Suspension`: `m_Frequency`, `m_DampingRatio`, `m_Angle` (degrees).
+    pub frequency: f32,
+    pub damping_ratio: f32,
+    pub angle: f32,
+}
+
+/// `CarControl`'s tuning.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarTuning {
+    pub max_speed: f32,
+    pub max_acceleration: f32,
+    pub max_deceleration: f32,
+    pub max_angular_acceleration: f32,
+    pub acceleration_body_torque_factor: f32,
+}
+
+/// A car placed in a level.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarSpawn {
+    pub name: String,
+    pub root: FileId,
+    pub layer: u8,
+    pub body: RigidbodySpec,
+    /// The body's polygon collider paths in root space.
+    pub collider: Vec<Vec<[f32; 2]>>,
+    pub nodes: Vec<VehicleNode>,
+    pub world: Affine,
+    pub wheels: Vec<CarWheel>,
+    pub tuning: CarTuning,
+    pub driver: Option<OccupantSeat>,
+    /// `CarGunnerControl` seats (a `ControlSlot` each) and the launchers under them.
+    pub gunners: Vec<usize>,
+    pub control_radius: f32,
+    pub disembarkment_point: Option<usize>,
+    pub camera_influencer: Option<usize>,
+    pub target: Option<usize>,
+    pub starting_health: f32,
+    pub explosion_fade_wait: Option<f32>,
+    pub explode_sound: Option<String>,
+    pub engine_sound: Option<LoopingSound>,
+}
+
+impl CarSpawn {
+    /// World transform of node `i` with the root at `root`.
+    pub fn world_of_node(&self, i: usize, root: &Affine) -> Affine {
+        let n = &self.nodes[i];
+        match n.parent {
+            None => *root,
+            Some(p) => {
+                let parent = self.world_of_node(p, root);
+                let r = n.local_rotation;
+                parent.mul(&Affine::from_trs(n.local_position, (r[0], r[1], r[2], r[3]), n.local_scale))
+            }
+        }
+    }
+}
+
+fn v2(v: Option<&Value>) -> [f32; 2] {
+    v.and_then(Value::as_vec2).map_or([0.0, 0.0], |(x, y)| [x, y])
+}
+
+fn rigidbody_of(go: &GameObject<'_>) -> RigidbodySpec {
+    let rb = go.component(class::RIGIDBODY_2D).map(|c| &c.body);
+    let f = |k: &str, d: f32| rb.and_then(|b| b.f32_of(k)).unwrap_or(d);
+    RigidbodySpec {
+        mass: f("m_Mass", 1.0),
+        linear_drag: f("m_LinearDrag", 0.0),
+        angular_drag: f("m_AngularDrag", 0.05),
+        gravity_scale: f("m_GravityScale", 1.0),
+        kinematic: rb.and_then(|b| b.bool_of("m_IsKinematic")).unwrap_or(false),
+        constraints: rb.and_then(|b| b.i64_of("m_Constraints")).unwrap_or(0),
+    }
+}
+
+/// Every active `CarControl` root of the scene.
+pub fn cars(scene: &Scene, scripts: &ScriptIndex) -> Vec<CarSpawn> {
+    let mut out = Vec::new();
+    for root in scene.game_objects() {
+        if !root.active_in_hierarchy() {
+            continue;
+        }
+        let Some(control) = script(&root, scripts, "CarControl") else { continue };
+        let mut nodes: Vec<VehicleNode> = Vec::new();
+        let mut objects: Vec<GameObject<'_>> = Vec::new();
+        let mut stack: Vec<(GameObject<'_>, Option<usize>)> = vec![(root, None)];
+        while let Some((go, parent)) = stack.pop() {
+            let t = go.transform();
+            let v3 = |k: &str, d: [f32; 3]| t.and_then(|t| t.body.get(k)).and_then(Value::as_vec3).map_or(d, |(x, y, z)| [x, y, z]);
+            let index = nodes.len();
+            nodes.push(VehicleNode {
+                id: go.id(),
+                name: go.name().to_owned(),
+                parent,
+                local_position: v3("m_LocalPosition", [0.0; 3]),
+                local_rotation: t.and_then(|t| t.body.get("m_LocalRotation")).and_then(Value::as_quat).map_or([0.0, 0.0, 0.0, 1.0], |(x, y, z, w)| [x, y, z, w]),
+                local_scale: v3("m_LocalScale", [1.0; 3]),
+                active_self: go.active_self(),
+            });
+            objects.push(go);
+            for child in go.children().into_iter().rev() {
+                stack.push((child, Some(index)));
+            }
+        }
+        let node_of = |id: FileId| nodes.iter().position(|n| n.id == id);
+        let world = root.world_affine();
+        let mut collider = Vec::new();
+        for c in root.components() {
+            if c.class_id != class::POLYGON_COLLIDER_2D || !c.body.bool_of("m_Enabled").unwrap_or(true) || c.body.bool_of("m_IsTrigger").unwrap_or(false) {
+                continue;
+            }
+            let offset = v2(c.body.get("m_Offset"));
+            for path in c.body.get("m_Points").and_then(|p| p.get("m_Paths")).map(Value::as_seq).unwrap_or(&[]) {
+                let pts: Vec<[f32; 2]> = path.as_seq().iter().filter_map(Value::as_vec2).map(|(x, y)| [x + offset[0], y + offset[1]]).collect();
+                if pts.len() >= 3 {
+                    collider.push(pts);
+                }
+            }
+        }
+        // `WheelJoint2D` (class 235) components of the root and the bodies they connect.
+        let mut wheels = Vec::new();
+        for c in root.components() {
+            if c.class_id != 235 || !c.body.bool_of("m_Enabled").unwrap_or(true) {
+                continue;
+            }
+            let b = &c.body;
+            let Some(wheel_go) = b.get("m_ConnectedRigidBody").and_then(Value::file_id).and_then(|id| scene.get(id)).and_then(|d| d.body.get("m_GameObject").and_then(Value::file_id)).and_then(|id| scene.game_object(id)) else { continue };
+            let Some(node) = node_of(wheel_go.id()) else { continue };
+            let circle = wheel_go.component(class::CIRCLE_COLLIDER_2D).map(|c| &c.body);
+            let suspension = b.get("m_Suspension");
+            wheels.push(CarWheel {
+                node,
+                body: rigidbody_of(&wheel_go),
+                radius: circle.and_then(|c| c.f32_of("m_Radius")).unwrap_or(0.5),
+                offset: v2(circle.and_then(|c| c.get("m_Offset"))),
+                material: circle.and_then(|c| c.get("m_Material")).and_then(Value::guid).map(str::to_owned),
+                anchor: v2(b.get("m_Anchor")),
+                connected_anchor: v2(b.get("m_ConnectedAnchor")),
+                frequency: suspension.and_then(|s| s.f32_of("m_Frequency")).unwrap_or(2.0),
+                damping_ratio: suspension.and_then(|s| s.f32_of("m_DampingRatio")).unwrap_or(0.7),
+                angle: suspension.and_then(|s| s.f32_of("m_Angle")).unwrap_or(90.0),
+            });
+        }
+        let cb = &control.body;
+        let driver_id = cb.get("driver").and_then(Value::file_id);
+        let mut driver = None;
+        let mut gunners = Vec::new();
+        for (i, go) in objects.iter().enumerate() {
+            for c in go.components() {
+                if c.class_id != class::MONO_BEHAVIOUR {
+                    continue;
+                }
+                match class_of(c, scripts) {
+                    Some("VehicleOccupant") if driver_id == Some(c.file_id) => {
+                        driver = Some(OccupantSeat {
+                            node: i,
+                            prefab: c.body.get("prefab").and_then(Value::guid).unwrap_or("").to_owned(),
+                            animation_state: c.body.str_of("animationState").unwrap_or("").to_owned(),
+                            enabled: c.body.bool_of("m_Enabled").unwrap_or(true),
+                        });
+                    }
+                    Some("CarGunnerControl") => gunners.push(i),
+                    _ => {}
+                }
+            }
+        }
+        let health = script(&root, scripts, "SetStartingHealth")
+            .and_then(|s| s.body.f32_of("startingHealth"))
+            .or_else(|| script(&root, scripts, "Health").and_then(|s| s.body.f32_of("startingHealth")))
+            .unwrap_or(100.0);
+        out.push(CarSpawn {
+            name: root.name().to_owned(),
+            root: root.id(),
+            layer: root.layer(),
+            body: rigidbody_of(&root),
+            collider,
+            world,
+            wheels,
+            tuning: CarTuning {
+                max_speed: cb.f32_of("maxSpeed").unwrap_or(18.0),
+                max_acceleration: cb.f32_of("maxAcceleration").unwrap_or(18.0),
+                max_deceleration: cb.f32_of("maxDeceleration").unwrap_or(18.0),
+                max_angular_acceleration: cb.f32_of("maxAngularAcceleration").unwrap_or(270.0),
+                acceleration_body_torque_factor: cb.f32_of("accelerationBodyTorqueFactor").unwrap_or(0.25),
+            },
+            driver,
+            gunners,
+            control_radius: script(&root, scripts, "ControlSlot").and_then(|s| s.body.f32_of("controlRadius")).unwrap_or(10.0),
+            disembarkment_point: nodes.iter().position(|n| n.name == "Disembarkment Point" && n.parent == Some(0)),
+            camera_influencer: objects.iter().position(|go| script(go, scripts, "CameraPositionInfluencer").is_some()),
+            target: objects.iter().position(|go| script(go, scripts, "Targetable").is_some()),
+            starting_health: health,
+            explosion_fade_wait: script(&root, scripts, "ExplodeSpritesAndLines").map(|d| d.body.f32_of("fadeWaitTime").unwrap_or(2.0)),
+            explode_sound: script(&root, scripts, "PlaySoundOnExplode").and_then(|d| d.body.str_of("sound")).filter(|s| !s.is_empty()).map(str::to_owned),
+            engine_sound: None,
+            nodes,
         });
     }
     out

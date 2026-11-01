@@ -17,6 +17,13 @@ The original game was built in Unity 5. This project studies how it *behaves*: i
 
 > **No game files are included.** This repository contains only original Rust code. To run it you need your own copy of *Stick 'Em Up 2* [on Steam](https://store.steampowered.com/app/282780); `Setup.bat` exports its data for you (see [Playing](#playing)).
 
+## Download
+
+> [!WARNING]
+> **This is a work in progress. It is not finished, and there WILL be bugs.** Levels, vehicles, menus and online play are still being built and fixed: expect missing features, crashes and things that behave differently from the original. Please report what you find in [Issues](../../issues).
+
+Get the latest build from **[Releases](../../releases/latest)**: download `StickEmUp2Rust.zip`, unzip it anywhere (not into the Steam game's folder, which has its own `SEU2.exe`), run `Setup.bat` once, then start `sticks_launcher.exe`. Releases are pre-releases (`v0.x`) until the remake is complete.
+
 ## Highlights
 
 - **Unity-exact frame order**: input → fixed steps → role input → characters → camera → present → draw. The physics step length is retuned every frame exactly as the original's `FixedUpdateSynchronizer` does.
@@ -27,7 +34,7 @@ The original game was built in Unity 5. This project studies how it *behaves*: i
 - **Particles and audio**: rocket trails, explosions, fireworks, and a MasterAudio emulation (sound variations, fades, mixer volumes, 3D falloff, music cross-fades).
 - **Vehicles**: helicopters fly with the original flight model and enemy AI. Players can board, fly and leave their own.
 - **The original lobby**: title screen, control assignment, mode, level and difficulty selection, player slots.
-- **Network play with rooms**: LAN games as in the original, plus internet games peer to peer (no server). Hosts create a named room with an optional password and a size; the room panel shows who is in it and who is ready, has a chat, and the host can remove players.
+- **Network play with rooms**: LAN games as in the original, plus internet games peer to peer (no server). Hosts create a named room with an optional password and a size; a room page shows who is in it, its room code and a chat, and the host can remove players.
 - **A launcher in the game's style**: cheats, settings and your online name on one cardboard screen drawn from the game's own art.
 
 ## Status
@@ -90,6 +97,16 @@ From a release zip (made with `Package.bat`, see [Sharing a build](#sharing-a-bu
 2. Run **`Setup.bat`** once. It finds the game in your Steam libraries and exports its art, sounds and levels into `assets_exported\` with [AssetRipper](https://github.com/AssetRipper/AssetRipper) (GPL-3.0, downloaded from its releases on first use, not bundled). If the game is not installed, it says so and offers to open Steam to install or buy it.
 3. Start **`sticks_launcher.exe`**, pick cheats and settings, and press **Play**.
 
+### Opening it from Steam
+
+Steam can open the launcher when you press **Play** on *Stick 'Em Up 2*, without changing the game's files: right-click the game in your library, **Properties**, and paste this into **Launch Options** (`Setup.bat` prints the line with your own path):
+
+```
+"C:\path\to\sticks_launcher.exe" %command%
+```
+
+Steam still counts your play time. `%command%` hands the launcher the original game's command line, so the launcher also shows **Play Original (Unity)** to start the original. To undo it, clear the box. (Unlike replacing the game's exe, this survives "Verify integrity of game files" and game updates.)
+
 ## Building from source
 
 **You need** a recent stable Rust toolchain ([rustup.rs](https://rustup.rs)) and your own copy of *Stick 'Em Up 2*, exported to a Unity project (`packaging\Setup.bat` does that from Steam). The game looks for the folder `ExportedProject`, which contains `Assets/` and `ProjectSettings/`.
@@ -126,15 +143,27 @@ cargo run --release -p sticks_game -- /path/to/ExportedProject "Assets/Game/Leve
 cargo run --release -p sticks_launcher
 ```
 
-A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), pick the volume, fullscreen and vertical sync, and set the name other players see. **Play** starts `sticks_game` from the same folder with those choices. Settings live only here; the game has no settings screen. **Original Game Only** starts the game without any of the additions (cheats, internet play, rooms, the working Send Link). The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
+A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite lives, rapid fire, every weapon, unbreakable helicopters, game speed, unlock all levels), drag the music and sound volume sliders, pick Windowed, Borderless or Fullscreen and vertical sync, and set the name other players see. **Play** starts the game (`SEU2.exe`) from the same folder with those choices. Settings live only here; the game has no settings screen. **Original Game Only** starts the game without any of the additions (cheats, internet play, rooms, room codes). The cheats other than "Unlock All Levels" need a game built with the local `crates/sticks_game/src/hacks.rs` (git-ignored); in a level `F2` lists their keys.
 
 ### Playing with friends
 
-**Start Network Game** opens a room: give it a name, an optional password and a size (2–4 players). While you are in a room, a bar at the top right opens the room panel: who is in it and who is ready, **Copy Invite**, **Ready**, the chat, **Hide** and **Leave**; the host can **Kick** players. The host starts the game from the usual screens once everybody is ready.
+**Start Network Game** opens a room: give it a name, an optional password and a size (2–4 players). The square server button in the bottom-left corner opens the online page: **Create a Room**, or join a friend's room by pasting its code. In a room the page shows who is in it, its room code with **Copy Room Code**, the chat and **Leave**; the host can **Kick** players. The host starts the game from the usual screens.
 
 - **Same network**: the room shows up as **Join Game: name 2/4** on the other players' title screens, as in the original.
-- **Internet**: peer to peer, no server. The host presses **Copy Invite** (or **Send Link**), which copies `seu2://<game code>/<name>`; a friend copies that text and the room appears on their title screen while it is open. Connections are direct when both routers allow it, and relayed (encrypted end to end) otherwise.
+- **Internet**: peer to peer, no server. The host gives friends the room code (**Copy Room Code**); a friend opens the online page (the server button), pastes it (Ctrl+V) and presses **Join**. A code already on the clipboard also makes the room show up on the title screen while it is open. Connections are direct when both routers allow it, and relayed (encrypted end to end) otherwise. The code is long (64 characters) because it is the host's own address; there is no server to hand out short ones.
 - A room with a password asks for it before joining.
+
+### Faster builds (Windows)
+
+- `dev.bat` builds and starts the launcher for testing with Bevy as a DLL and LLVM's linker (`rust-lld`, ships with Rust): after a change only your own code is rebuilt and relinked. Not for sharing.
+- `Package.bat` (and `claude_build.bat`) use `rust-lld` too. To use it for plain `cargo` commands, create `.cargo\config.toml` with:
+
+  ```toml
+  [target.x86_64-pc-windows-msvc]
+  linker = "rust-lld.exe"
+  ```
+- Debug builds (`cargo run`, no `--release`) and release builds each compile every dependency once and keep it; switching between them is not a rebuild. Excluding `target\`, `%USERPROFILE%\.cargo` and `%USERPROFILE%\.rustup` from Windows Defender's scanning helps a lot.
+- The game and launcher take the original game's icon from your `SEU2.exe` when they are built (found in your Steam libraries, or set `STICK_ORIGINAL_EXE`); without it they get the remake's own drawn icon (`tools/make_icons.py`).
 
 ### Sharing a build
 
@@ -142,7 +171,7 @@ A cardboard screen in the Lobby's style: switch cheats on (god mode, infinite li
 Package.bat
 ```
 
-Builds the release programs and writes `dist\StickEmUp2Rust.zip`: `sticks_launcher.exe`, `sticks_game.exe`, `Setup.bat`, `setup.ps1` and a player README. It contains no game files; every player exports their own copy with `Setup.bat`.
+Builds the release programs and writes `dist\StickEmUp2Rust.zip`: `sticks_launcher.exe`, `SEU2.exe` (the game), `Setup.bat`, `setup.ps1` and a player README. It contains no game files; every player exports their own copy with `Setup.bat`.
 
 ### Tests
 

@@ -66,7 +66,9 @@ impl Plugin for SceneryPlugin {
                 commands.remove_resource::<Props>();
                 commands.insert_resource(Scrollers::default());
             })
-            .add_systems(Update, step_scrollers.in_set(crate::FrameSet::FixedSteps).after(crate::player::run_fixed_steps))
+            .init_resource::<Waves>()
+            .add_systems(OnEnter(AppState::InGame), start_waves)
+            .add_systems(Update, (step_scrollers, step_waves).chain().in_set(crate::FrameSet::FixedSteps).after(crate::player::run_fixed_steps))
             .add_systems(
                 Update,
                 (
@@ -93,6 +95,39 @@ fn step_scrollers(clock: Res<FrameClock>, mut scrollers: ResMut<Scrollers>, offs
     }
     if let Some(mut offsets) = offsets {
         offsets.0 = scrollers.0.iter().map(ScrollerState::offset).collect();
+    }
+}
+
+/// `Wave`s: the spec, `loop` (the sprite's untrimmed size) and the time so far.
+#[derive(Resource, Default)]
+struct Waves(Vec<(unity_data::scenery::WaveSpec, [f32; 2], f32)>);
+
+/// `Wave.Start`: the loop is the sprite's untrimmed bounds size.
+fn start_waves(mut commands: Commands, config: Res<GameConfig>, level: Res<ActiveLevel>) {
+    let assets_dir = config.assets_dir();
+    let mut libraries: HashMap<String, Option<SpriteLibrary>> = HashMap::new();
+    let mut waves = Vec::new();
+    for spec in &level.0.waves {
+        let Some(sprite) = level.0.sprites.iter().find(|s| s.object == spec.object && s.shadow_of.is_none()) else { continue };
+        let lib = libraries.entry(sprite.collection.clone()).or_insert_with(|| SpriteLibrary::load(&assets_dir, &sprite.collection).ok());
+        let Some(def) = lib.as_ref().and_then(|l| l.collection.sprites.get(sprite.sprite_id)) else { continue };
+        let size = def.untrimmed_bounds[1];
+        waves.push((spec.clone(), [size[0] * sprite.scale[0].abs(), size[1] * sprite.scale[1].abs()], 0.0));
+    }
+    commands.insert_resource(Waves(waves));
+}
+
+/// `Wave.Update`: `startPosition + (velocity.x * time % loop.x, sin(time * velocity.y * 2π) *
+/// amplitude % loop.y)` (C#'s `%` keeps the dividend's sign, as Rust's does).
+fn step_waves(clock: Res<FrameClock>, mut waves: ResMut<Waves>, offsets: Option<ResMut<SpriteFollowOffsets>>) {
+    let delta = clock.stepper.frame().delta;
+    let Some(mut offsets) = offsets else { return };
+    for (spec, size, time) in &mut waves.0 {
+        *time += delta;
+        let x = if size[0] != 0.0 { spec.velocity[0] * *time % size[0] } else { 0.0 };
+        let wobble = (*time * spec.velocity[1] * std::f32::consts::PI * 2.0).sin() * spec.oscillation_amplitude;
+        let y = if size[1] != 0.0 { wobble % size[1] } else { wobble };
+        offsets.0.push([x * spec.parent_scale[0], y * spec.parent_scale[1]]);
     }
 }
 

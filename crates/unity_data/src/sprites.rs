@@ -82,18 +82,20 @@ pub fn parse_collection(scene: &Scene, scripts: &ScriptIndex) -> Option<SpriteCo
         }
         let mut sprites = Vec::new();
         for def in doc.body.get("spriteDefinitions")?.as_seq() {
-            let positions = def.get("positions")?.as_seq().iter().filter_map(Value::as_vec3).map(|(x, y, z)| [x, y, z]).collect();
-            let uvs = def.get("uvs")?.as_seq().iter().filter_map(Value::as_vec2).map(|(x, y)| [x, y]).collect();
+            let positions = def.get("positions").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(Value::as_vec3).map(|(x, y, z)| [x, y, z]).collect();
+            let uvs = def.get("uvs").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(Value::as_vec2).map(|(x, y)| [x, y]).collect();
             let normals = def.get("normals").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(Value::as_vec3).map(|(x, y, z)| [x, y, z]).collect();
             let trimmed: Vec<[f32; 3]> = def.get("boundsData").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(Value::as_vec3).map(|(x, y, z)| [x, y, z]).collect();
             let untrimmed: Vec<[f32; 3]> = def.get("untrimmedBoundsData").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(Value::as_vec3).map(|(x, y, z)| [x, y, z]).collect();
             sprites.push(SpriteDef {
-                name: def.str_of("name")?.to_owned(),
+                // Unused slots (`- name:` with nothing else useful) keep their index: sprite ids
+                // index into this list. Treetops' collection has one.
+                name: def.str_of("name").unwrap_or("").to_owned(),
                 positions,
                 normals,
                 uvs,
                 indices: hex_u32s(def.str_of("indices").unwrap_or("")),
-                material_guid: def.get("material")?.guid().unwrap_or("").to_owned(),
+                material_guid: def.get("material").and_then(Value::guid).unwrap_or("").to_owned(),
                 texel_size: def.get("texelSize").and_then(Value::as_vec2).map_or([0.0, 0.0], |(x, y)| [x, y]),
                 untrimmed_bounds: [untrimmed.first().copied().unwrap_or([0.0; 3]), untrimmed.get(1).copied().unwrap_or([0.0; 3])],
                 bounds: [trimmed.first().copied().unwrap_or([0.0; 3]), trimmed.get(1).copied().unwrap_or([0.0; 3])],
@@ -189,6 +191,43 @@ impl SpriteLibrary {
         }
         SpriteLibrary { collection, textures }
     }
+}
+
+/// Other sprite collections (every prefab that is one, in path order) that hold some of
+/// `names`, each with the names it supplies, until every name is found. For sprites a level's
+/// own collection lacks: a weapon the level does not have, given by the All Weapons cheat.
+pub fn collections_supplying(assets_dir: &Path, names: &[&str], skip: &[&str]) -> Vec<(SpriteLibrary, Vec<String>)> {
+    let mut wanted: Vec<&str> = names.to_vec();
+    let mut out = Vec::new();
+    if wanted.is_empty() {
+        return out;
+    }
+    let prefabs = GuidIndex::scan(&assets_dir.join("GameObject"), "prefab");
+    let scripts = ScriptIndex::scan(&assets_dir.join("Scripts"));
+    let materials = MaterialLibrary::scan(assets_dir);
+    let mut guids = prefabs.guids();
+    guids.retain(|g| !skip.contains(&g.as_str()));
+    guids.sort_by(|a, b| prefabs.path(a).cmp(&prefabs.path(b)));
+    for guid in guids {
+        let Some(path) = prefabs.path(&guid) else { continue };
+        // Cheap test before the full parse: a collection prefab names the wanted sprites.
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        if !text.contains("spriteDefinitions:") || !wanted.iter().any(|n| text.contains(n)) {
+            continue;
+        }
+        let Ok(scene) = Scene::load(path) else { continue };
+        let Some(collection) = parse_collection(&scene, &scripts) else { continue };
+        let found: Vec<String> = wanted.iter().filter(|n| collection.id_by_name(n).is_some()).map(|n| (*n).to_owned()).collect();
+        if found.is_empty() {
+            continue;
+        }
+        wanted.retain(|n| !found.iter().any(|f| f == n));
+        out.push((SpriteLibrary::with_textures(collection, &materials), found));
+        if wanted.is_empty() {
+            break;
+        }
+    }
+    out
 }
 
 /// A `tk2dSprite` placed in a scene, with everything needed to build its mesh.

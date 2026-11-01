@@ -28,6 +28,8 @@ pub struct ObjectNode {
     pub local_scale: [f32; 3],
     /// `Transform.localToWorldMatrix` as serialized.
     pub world: Affine,
+    /// `GameObject.m_Layer`.
+    pub layer: u8,
 }
 
 /// One `MonoBehaviour`.
@@ -113,6 +115,93 @@ impl InteractiveScene {
         self.objects.iter().position(|o| o.parent.is_none() && o.name == name)
     }
 
+    /// Every object under `root` (itself first, then breadth first).
+    pub fn subtree(&self, root: usize) -> Vec<usize> {
+        let mut out = vec![root];
+        let mut i = 0;
+        while i < out.len() {
+            out.extend(self.objects[out[i]].children.iter().copied());
+            i += 1;
+        }
+        out
+    }
+
+    /// Add the objects under `roots` of another scene (a level's UI-layer objects drawn with the
+    /// Permanent System's UI camera) after this scene's objects, with their sprites, sliced
+    /// sprites, texts, scripts and sorting. File ids of different scenes can clash, so the
+    /// grafted ids are tagged with [`GRAFT_TAG`]; script fields keep the other scene's ids (resolve
+    /// references in `other` before grafting). Returns `other`'s object index → the new index.
+    pub fn graft(&mut self, other: &InteractiveScene, roots: &[usize]) -> HashMap<usize, usize> {
+        let mut taken: Vec<usize> = Vec::new();
+        for &r in roots {
+            taken.extend(other.subtree(r));
+        }
+        let base = self.objects.len();
+        let map: HashMap<usize, usize> = taken.iter().enumerate().map(|(k, &i)| (i, base + k)).collect();
+        for &i in &taken {
+            let o = &other.objects[i];
+            let id = o.id | GRAFT_TAG;
+            self.by_id.insert(id, map[&i]);
+            self.objects.push(ObjectNode {
+                id,
+                name: o.name.clone(),
+                parent: o.parent.and_then(|p| map.get(&p).copied()),
+                children: o.children.iter().filter_map(|c| map.get(c).copied()).collect(),
+                active_self: o.active_self,
+                local_position: o.local_position,
+                local_rotation: o.local_rotation,
+                local_scale: o.local_scale,
+                world: o.world,
+                layer: o.layer,
+            });
+        }
+        for (&component, &object) in &other.component_object {
+            if let Some(&new) = map.get(&object) {
+                self.component_object.insert(component | GRAFT_TAG, new);
+            }
+        }
+        for script in &other.scripts {
+            if let Some(&object) = map.get(&script.object) {
+                self.scripts.push(ScriptInstance { object, ..script.clone() });
+            }
+        }
+        for (&object, &sorting) in &other.sorting {
+            if let Some(&new) = map.get(&object) {
+                self.sorting.insert(new, sorting);
+            }
+        }
+        let inside = |id: FileId| other.object_of(id).is_some_and(|i| map.contains_key(&i));
+        let sprite_base = self.sprites.len();
+        let sprite_index: HashMap<usize, usize> = other.sprites.iter().enumerate().filter(|(_, s)| inside(s.object)).enumerate().map(|(k, (i, _))| (i, sprite_base + k)).collect();
+        for (i, sprite) in other.sprites.iter().enumerate() {
+            if !sprite_index.contains_key(&i) {
+                continue;
+            }
+            let mut sprite = sprite.clone();
+            sprite.object |= GRAFT_TAG;
+            sprite.rigid_root = sprite.rigid_root.map(|r| r | GRAFT_TAG);
+            sprite.shadow_of = sprite.shadow_of.and_then(|(c, plane)| sprite_index.get(&c).map(|&c| (c, plane)));
+            self.sprites.push(sprite);
+        }
+        for sliced in other.sliced.iter().filter(|s| inside(s.object)) {
+            let mut sliced = sliced.clone();
+            sliced.object |= GRAFT_TAG;
+            self.sliced.push(sliced);
+        }
+        let text_base = self.texts.len();
+        let text_index: HashMap<usize, usize> = other.texts.iter().enumerate().filter(|(_, t)| inside(t.object)).enumerate().map(|(k, (i, _))| (i, text_base + k)).collect();
+        for (i, text) in other.texts.iter().enumerate() {
+            if !text_index.contains_key(&i) {
+                continue;
+            }
+            let mut text = text.clone();
+            text.object |= GRAFT_TAG;
+            text.shadow_of = text.shadow_of.and_then(|(c, font, plane)| text_index.get(&c).map(|&c| (c, font, plane)));
+            self.texts.push(text);
+        }
+        map
+    }
+
     /// `activeInHierarchy` under the given `activeSelf` flags.
     pub fn active_in_hierarchy(&self, object: usize, active_self: &[bool]) -> bool {
         let mut current = Some(object);
@@ -125,6 +214,9 @@ impl InteractiveScene {
         true
     }
 }
+
+/// Marks the file ids of objects grafted from another scene ([`InteractiveScene::graft`]).
+pub const GRAFT_TAG: FileId = 1 << 61;
 
 /// Parse a scene (relative to the export root) as an [`InteractiveScene`].
 pub fn load_interactive_scene(export_root: &Path, scene_path: &str) -> std::io::Result<InteractiveScene> {
@@ -147,6 +239,7 @@ pub fn load_interactive_scene(export_root: &Path, scene_path: &str) -> std::io::
             local_rotation: g.transform().and_then(|t| t.body.get("m_LocalRotation")).and_then(Value::as_quat).map_or([0.0, 0.0, 0.0, 1.0], |(x, y, z, w)| [x, y, z, w]),
             local_scale: g.transform().and_then(|t| t.body.get("m_LocalScale")).and_then(Value::as_vec3).map_or([1.0; 3], |(x, y, z)| [x, y, z]),
             world: g.world_affine(),
+            layer: g.layer(),
         })
         .collect();
     objects.shrink_to_fit();

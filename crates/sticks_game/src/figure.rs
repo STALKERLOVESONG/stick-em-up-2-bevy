@@ -62,6 +62,34 @@ impl ManArt {
     }
 }
 
+impl ManArt {
+    /// What a `VehicleOccupant` draws: its `Man` (the "Vehicle Occupant" prefab, the same rig with
+    /// no weapon sprite showing) played into the animator state `state` ("Driving", "Sitting"),
+    /// at the seat's world position and rotation, in the controlling player's colours.
+    ///
+    /// TODO(UNCERTAIN): the occupant prefab keeps all three weapon pivots active with their
+    /// sprites off; it is drawn here with nothing equipped, so the arms follow the clip alone.
+    pub(crate) fn occupant_renderers(
+        &self,
+        animation: &Arc<sticks_sim::animator::AnimatorModel>,
+        state: &str,
+        position: unity_compat::Vec3,
+        rotation: unity_compat::Quat,
+        palette: CharacterPalette,
+        light: Option<unity_compat::Vec3>,
+    ) -> Vec<(u32, sticks_sim::draw::Geometry)> {
+        let Some(state) = animation.state_index(state) else { return Vec::new() };
+        let mut animator = sticks_sim::animator::Animator::new(animation.clone());
+        animator.play(state);
+        let solved = self.model.solve(&animator.pose());
+        // Posed at the usual depth, then moved to the seat with its shadow planes.
+        let default_z = sticks_sim::character::DEFAULT_Z;
+        let placement = sticks_sim::visual::BodyPlacement { position: unity_compat::Vec3::new(position.x, position.y, default_z), rotation };
+        let visual = self.model.visual(&solved, &placement, &palette, light, &|bone| self.model.active_with_weapon(bone, None)).shifted_z(position.z - default_z);
+        visual.renderers_textured(&self.art).into_iter().filter(|(_, g)| !g.is_empty()).map(|(t, g)| (t.unwrap_or(self.texture), g)).collect()
+    }
+}
+
 /// `CharacterColor` of an avatar whose colours differ from the prefab's (`CharacterColorSetter`).
 #[derive(Component, Clone, Copy, Deref)]
 pub struct Palette(pub CharacterPalette);
@@ -138,6 +166,30 @@ pub(crate) fn load_man_art(
         }
     }
     art.add_sprites(&library.collection, projectiles.values().flat_map(|spec| spec.sprites.iter().map(|s| s.sprite_name.as_str())));
+
+    // Weapons (and their projectiles) whose sprites this level's collection lacks are not drawn
+    // in the original (`SpriteFinder` only searches the level). A weapon can only be held here
+    // through the All Weapons cheat, so outside "Original Game Only" those sprites are borrowed
+    // from another level's collection, with that collection's atlas.
+    if !crate::settings::original_only() {
+        let rig_names = rig.bones.iter().filter_map(|b| b.flat_sprite.as_ref()).map(|f| f.sprite_name.as_str());
+        let projectile_names = projectiles.values().flat_map(|spec| spec.sprites.iter().map(|s| s.sprite_name.as_str()));
+        let missing = art.missing(rig_names.chain(projectile_names).filter(|n| !n.is_empty()));
+        if !missing.is_empty() {
+            let mut load = TextureLoad::new(&assets, &asset_server, &mut images, &mut materials);
+            for (other, names) in unity_data::sprites::collections_supplying(&assets, &missing, &[]) {
+                for name in &names {
+                    let Some(atlas) = other.collection.sprite(name).and_then(|def| other.texture_of(def)) else { continue };
+                    let texture = textures.id(atlas, &mut load);
+                    art.borrow_sprites(&other.collection, [name.as_str()], texture);
+                }
+            }
+            let still = art.missing(missing.iter().copied());
+            if !still.is_empty() {
+                info!("sprites no collection has: {still:?}");
+            }
+        }
+    }
     commands.insert_resource(ProjectileLibrary(projectiles));
     commands.insert_resource(crate::weapon::MeleeLibrary(melee));
     let model = CharacterRigModel::new(avatar, rig).expect("the humanoid avatar does not fit the Man rig");
@@ -250,8 +302,8 @@ fn queue_figures(
         let palette = if flash.is_some_and(|f| f.flashing) { palette.hit_version() } else { palette };
         let equipped = armament.equipped();
         let visual = model.visual(&posed.solved, &posed.placement, &palette, light.for_shadows, &|bone| model.active_with_weapon(bone, equipped));
-        for geometry in visual.renderers(&art.art) {
-            queue.0.push_frame(art.texture, geometry);
+        for (texture, geometry) in visual.renderers_textured(&art.art) {
+            queue.0.push_frame(texture.unwrap_or(art.texture), geometry);
         }
         let root = posed.placement.position;
         match last {
@@ -305,8 +357,8 @@ fn tick_explosions(mut commands: Commands, clock: Res<FrameClock>, mut explosion
 fn queue_explosions(art: Option<Res<ManArt>>, light: Res<SceneLight>, explosions: Query<&Exploding>, mut queue: ResMut<FrameQueue>) {
     let Some(art) = art else { return };
     for exploding in &explosions {
-        for geometry in exploding.0.renderers(&art.art, light.for_shadows) {
-            queue.0.push_frame(art.texture, geometry);
+        for (texture, geometry) in exploding.0.renderers_textured(&art.art, light.for_shadows) {
+            queue.0.push_frame(texture.unwrap_or(art.texture), geometry);
         }
     }
 }
@@ -321,8 +373,8 @@ fn queue_projectiles(art: Option<Res<ManArt>>, light: Res<SceneLight>, projectil
         let shot = &projectile.shot;
         let visual: CharacterVisual = projectile_visual(&projectile.spec.sprites, shot.position, projectile.spec.spawn_z, shot.rotation_degrees, light.for_shadows);
         // A projectile has no lines: skip the empty `LinesRenderer` entry.
-        for geometry in visual.renderers(&art.art).into_iter().skip(1) {
-            queue.0.push_frame(art.texture, geometry);
+        for (texture, geometry) in visual.renderers_textured(&art.art).into_iter().skip(1) {
+            queue.0.push_frame(texture.unwrap_or(art.texture), geometry);
         }
     }
 }

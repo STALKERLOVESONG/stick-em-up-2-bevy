@@ -24,6 +24,16 @@ $Check = Join-Path $Exported 'Assets\Game\Lobby\Lobby.unity'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 function Say($text) { Write-Host $text }
+function SteamTip {
+    # Steam can open the launcher when Play is pressed: its launch options run the launcher with
+    # the original's command (%command%), which the launcher's "Play Original" button uses.
+    $launcher = Join-Path $Root 'sticks_launcher.exe'
+    if (-not (Test-Path $launcher)) { $launcher = Join-Path $Root 'target\release\sticks_launcher.exe' }
+    Say ''
+    Say "To open it from Steam: right-click Stick 'Em Up 2 in your library, Properties,"
+    Say 'and paste this into Launch Options (clear the box to undo):'
+    Write-Host ('"' + $launcher + '" %command%') -ForegroundColor Cyan
+}
 function Fail($text) { Write-Host ''; Write-Host $text -ForegroundColor Red; exit 1 }
 
 Say "Stick 'Em Up 2 (Rust remake) setup"
@@ -32,6 +42,7 @@ Say '-----------------------------------'
 if ((Test-Path $Check) -and -not $Force) {
     Say 'The game data is already exported. You can start sticks_launcher.exe.'
     Say '(Run Setup.bat -Force to export it again.)'
+    SteamTip
     exit 0
 }
 
@@ -165,3 +176,4 @@ if (-not (Test-Path (Join-Path $Exported 'Assets\Scripts\Assembly-CSharp'))) {
 }
 Say ''
 Write-Host 'Done. Start sticks_launcher.exe to play.' -ForegroundColor Green
+SteamTip

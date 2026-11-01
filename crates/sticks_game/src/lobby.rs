@@ -2236,13 +2236,6 @@ fn start_game(
         net.request_load(sticks_net::LoadKind::Normal);
         return;
     }
-    // A room starts once everybody in it is ready (not in the original).
-    if net.is_host() && !net.everyone_ready() {
-        let waiting = net.room.as_ref().map(|r| r.waiting_for().join(", ")).unwrap_or_default();
-        net.announce(&format!("Waiting for {waiting} to be ready."));
-        lobby.network.show_room = true;
-        return;
-    }
     let levels = lobby.levels.levels(memory.mode);
     let Some(id) = levels.get(memory.level_index).cloned() else { return };
     if let Some(button) = button {
@@ -2290,8 +2283,15 @@ fn find_level_scene(assets_dir: &std::path::Path, id: &str) -> Option<String> {
 
 /// `CameraPositioner.LateUpdate` with the Lobby's influencers: every active
 /// `CameraPositionInfluencer` (the active screen's).
-fn lobby_camera(lobby: Res<Lobby>, time: Res<Time>, windows: Query<&Window, With<PrimaryWindow>>, mut rigs: Query<(&mut Rig, &mut Transform), With<LobbyCamera>>) {
-    let Ok((mut rig, mut transform)) = rigs.single_mut() else { return };
+fn lobby_camera(
+    lobby: Res<Lobby>,
+    time: Res<Time>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut rigs: Query<(&mut Rig, &mut Transform, &Projection), With<LobbyCamera>>,
+    mut logged: Local<Option<(Vec<usize>, u32)>>,
+) {
+    let Ok((mut rig, mut transform, projection)) = rigs.single_mut() else { return };
+    let mut influencers = Vec::new();
     for s in lobby.scene.scripts_named("CameraPositionInfluencer") {
         if !s.enabled || !lobby.active_in_hierarchy(s.object) {
             continue;
@@ -2302,9 +2302,30 @@ fn lobby_camera(lobby: Res<Lobby>, time: Res<Time>, windows: Query<&Window, With
         }
         let p = lobby.world_position(s.object);
         rig.add_influence(unity_compat::Vec2::new(p.x, p.y));
+        influencers.push(s.object);
     }
     let aspect = windows.single().map_or(16.0 / 9.0, |w| w.width() / w.height());
     rig.late_update(aspect, time.delta_secs().min(1.0 / 3.0));
+    // Diagnostics for the framing (logged about a second after the influencers change).
+    let frames = match logged.as_mut() {
+        Some((seen, frames)) if *seen == influencers => {
+            *frames += 1;
+            *frames
+        }
+        _ => {
+            *logged = Some((influencers.clone(), 0));
+            0
+        }
+    };
+    if frames == 60 {
+        let names: Vec<&str> = influencers.iter().map(|&o| lobby.scene.objects[o].name.as_str()).collect();
+        let window = windows.single().map(|w| (w.width(), w.height(), w.physical_width(), w.physical_height())).ok();
+        let fov = match projection {
+            Projection::Perspective(p) => p.fov.to_degrees(),
+            _ => 0.0,
+        };
+        info!("lobby camera: influencers {names:?}, aspect {aspect:.3}, window {window:?}, fov {fov:.1}, position {:?}", rig.position);
+    }
     // Game z is negated for Bevy.
     let p = rig.position;
     transform.translation = Vec3::new(p.x, p.y, -p.z);

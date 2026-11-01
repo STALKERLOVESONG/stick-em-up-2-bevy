@@ -381,6 +381,25 @@ impl Shot {
         }
     }
 
+    /// `Seeker.FixedUpdate` (after `Projectile.FixedUpdate`, before the physics step): turn the
+    /// body towards `target` by at most `max_degrees_per_second * dt` and fly at the
+    /// projectile's speed along the new heading.
+    /// TODO(UNCERTAIN): `Seeker` is taken to run after `Projectile` within the fixed step (script
+    /// execution order is not set for either); the other order would only delay the turn of a
+    /// propelled projectile by one step.
+    pub fn seek(&mut self, target: Vec2, max_degrees_per_second: f32, dt: f32) {
+        let to = target - self.position;
+        let wanted = to.y.atan2(to.x) * 57.295_78;
+        let delta = unity_compat::mathf::delta_angle(self.rotation_degrees, wanted);
+        self.rotation_degrees += unity_compat::mathf::sign(delta) * delta.abs().min(max_degrees_per_second * dt);
+        let radians = self.rotation_degrees * (std::f32::consts::PI / 180.0);
+        let speed = self.launch_velocity.magnitude();
+        let velocity = Vec2::new(radians.cos(), radians.sin()) * speed;
+        // A propelled projectile's next `Projectile.FixedUpdate` keeps this velocity.
+        self.launch_velocity = velocity;
+        self.velocity = velocity;
+    }
+
     /// `TellOwnerToExplodeOnCollision.Update` (before any contact): remember the rotation.
     pub fn frame_update(&mut self) {
         self.rotation_at_last_update = self.rotation_degrees;

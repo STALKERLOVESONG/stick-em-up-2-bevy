@@ -3,6 +3,8 @@ rem Builds the release programs and puts what a player needs in dist\StickEmUp2R
 rem of it): the launcher, the game, Setup.bat / setup.ps1 (exports the player's own copy of the
 rem game from Steam) and a README. No game files are included.
 cd /d "%~dp0"
+rem Faster linking with LLVM's linker (ships with Rust).
+set CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe
 cargo build --release -p sticks_game -p sticks_launcher
 if errorlevel 1 (
     echo Build failed.
@@ -12,7 +14,7 @@ if errorlevel 1 (
 set OUT=dist\StickEmUp2Rust
 if exist "%OUT%" rmdir /s /q "%OUT%"
 mkdir "%OUT%"
-copy /y target\release\sticks_game.exe "%OUT%\" >nul
+copy /y target\release\SEU2.exe "%OUT%\" >nul
 copy /y target\release\sticks_launcher.exe "%OUT%\" >nul
 copy /y packaging\Setup.bat "%OUT%\" >nul
 copy /y packaging\setup.ps1 "%OUT%\" >nul

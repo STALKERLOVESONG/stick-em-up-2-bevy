@@ -1,0 +1,8 @@
+[package]
+name = "exe_icon"
+description = "Build helper: the program icon, taken from the player's copy of the original game's exe."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

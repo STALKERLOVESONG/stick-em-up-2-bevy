@@ -164,20 +164,56 @@ Expected values come from decompiled source and serialized data, not from record
 
 ## 7. Known gaps
 
-- Effects: `SpawnLocallyOnExplode` prefabs other than particle effects; seeking rockets (`Seeker` parsed, not steered).
+Done in the 2026-11-01 pass (built on Windows by the user; see the session log for checks):
+`Seeker` steering (Corruption 2's seeking rockets: nearest player or player-helicopter
+"Target" at spawn, turned by `maximumAngularAcceleration` each fixed step); `TimeLimit` with
+the level's "Timing UI" (Moon Race) and `DestroyAllEnemiesLevelEnder.countdownLabel` (Office):
+the level's UI-layer objects are grafted into the HUD scene (`InteractiveScene::graft`,
+`LayoutControls`, `TimerUI`); `TriggeredByAllPlayers` counts a helicopter's pilot (hull
+overlap, `Body::overlapping_triggers` with polygon pieces); H4 helicopter explosion
+(`ExplodeSpritesAndLines`, `PlaySoundOnExplode`, ejection) with the player helicopter's respawn
+at its start and enemy helicopters destroyed; projectile sprites keep their out-of-plane tilt
+(the Rocket's halves at ±15° about x, shaded differently); weapons a level lacks borrow sprites
+from another collection (All Weapons cheat, not in Original Game Only); Treetops' collection
+with an empty sprite slot loads (it failed before and hung the load). Additions: room codes
+(Send Link hidden as in the original), the launcher's Play Original button from Steam's
+`%command%`, the original's icon in both programs (`exe_icon`).
+
+Moon fixes (same day, after the first car build): `GravityChanger` (Moon and Moon Race run at
+(0, −8.055) instead of the project's −16.076; characters' jumps and the rovers follow it); a
+`PolygonColliderRenderer` on another object that names a collider draws it (Moon Race's track
+`Ground` is drawn by its "Base Visual" child; before, only the strip of ground sprites showed);
+`TriggeredByAllPlayers` and `TimeLimit` count the player driving a car (any chassis or wheel
+collider; Moon Race could not be finished before); `VehicleOccupant` figures (the driver of a
+car and the pilot of a helicopter in the player's colours while driven; enemy pilots and
+passengers the scene enables), posed in "Driving"/"Sitting" with `Animator::play`; the
+weapon-test target appears only on the development level `Platforms` (it stood in Moon Race).
+Checked: the rover faces right as in the scene (seat at the back, dish over the front wheel);
+W/S set its speed and A/D tilt it, as `KeyboardAndMouseCarInput` does. Room UI: a square server
+button (bottom left) opens an online page (create, join by code, members, chat); rooms no longer
+wait for "ready".
+
+
+- Effects: `SpawnLocallyOnExplode` prefabs other than particle effects; `ConstantExplosion` (Corruption 2); `Wave` (Pirates' water), `Whale`, `StarShower` and `Dock` (Moon).
 - HUD: off-screen `Pointers`, control prompts.
 - Lobby: touch input; `RemoteLevelAvailability` (levels another machine has unlocked); original Level Loading scene; achievement triggers outside level end (`rover 720/1440`, `four frag shot`, `office all destroyed`, `0 shot perfect health …`).
-- Level flow: Moon Race's `TimeLimit` + "Timing UI", Office's "Enemies Remaining UI" (level texts on the UI layer are not drawn yet), `TriggeredByAllPlayers` for players inside a helicopter, the "Complete" ending scene, server/client menus.
-- Vehicles: H4 helicopter explosion (and with it the player helicopter's respawn via `RespawnerInstantiator`/`RespawnAtStartPosition`), H5 seated occupants (pilot/passenger figures not drawn); gunner/passenger seats for extra local players (with 2+ players a player helicopter's guns are silent until these exist); cars (`CarControl`, `WheelJoint2D`), rockets (`RocketControl`), cannons (`CannonControl`) — the contact solver exists now; cars still need Box2D's wheel joint; the "Enter Vehicle" control prompt.
+- Level flow: the "Complete" ending scene, server/client menus; `TimeLimit` finishers are host-only in a network game.
+- Vehicles: gunner seats following a gunner (`CarGunnerControl`, `HelicopterGunnerControl`, `VehicleOccupantIK`); gunner/passenger seats for extra local players (with 2+ players a player helicopter's guns are silent until these exist); cars (`CarControl`, `WheelJoint2D`), rockets (`RocketControl`), cannons (`CannonControl`) — the contact solver exists now; cars still need Box2D's wheel joint; the "Enter Vehicle" control prompt.
 - Weapons: verify Shuriken, Pistol and Spear end to end in Japan / Pirates / Treetops; the Sword's swing animation trigger (`firingAnimator`); projectiles touching the sword's Damager.
-- Enemies: `Wave`s/spawners, cannons, `Seeking Rocket`; moving platforms.
+- Enemies: cannons; moving platforms.
 - Audio: stereo panning.
 - Networking: transport is TCP on the LAN and iroh QUIC on the internet, not RakNet (the original cannot join); cheats from the launcher also act on other machines' avatars in a network game; breakable scenery and letters are simulated per machine; helicopter hulls follow their owner by a simple pull (no `SynchronizeRigidBody2D` extrapolation); projectiles are simulated by every machine from the shared input (only the host's hit); not yet tried between two machines.
 
 ## 8. Next steps
 
+0. Cars (Moon, Moon Race, Corruption 2): first version in `sticks_game::cars` (spawn from
+   `Level::cars`, `CarDrive` + `step_with_joints` per car, boarding/driving/leaving through
+   `vehicles`, camera influencers, hulls as obstacles, projectile hits, explosion). Still to do:
+   car–car and car–helicopter contacts, the gunner seat (`CarGunnerControl`), the wheels' `PhysicsMaterial2D`, the flip goals, the engine sound, the driver's HUD
+   bar showing the car's health, enemies targeting cars; then rockets (`RocketControl`) and
+   cannons (`CannonControl`).
 1. `cargo check -p sticks_game` / `cargo clippy` on a machine with crates.io (this pass changed input, lobby, HUD, life, vehicles, level loading and added `input.rs` / `versus.rs` / `scenery.rs` without a compiler); then a Versus game in Japan VS with a gamepad + keyboard, and Japan's campaign (sky, clouds, lamps, emerging enemies).
-2. H4 helicopter explosion + respawn, H5 occupants; then cars (`WheelJoint2D`), rockets and cannons on top of `sticks_sim::contact`.
+2. Rockets (`RocketControl`) and cannons (`CannonControl`) on top of `sticks_sim::contact`.
 3. Run every campaign level to its end (Skyline marker, Office enemy count, Corruption 2 boss) and compare the end-of-level screen with the original; `Emerge`, persistence (`DataManager` scores, tips), Moon Race's time limit, UI-layer level texts.
 4. Lobby remainder (Level Loading scene; the in-level achievement triggers).
 5. Importer (requested 2026-10-26): players point the game at their own install (`<Game>_Data`, or found in the Steam library folders); on first run the game runs a pinned AssetRipper version headless into a cache folder, checks that the output matches the expected `ExportedProject` layout (script GUIDs, file names), remembers the location, and makes `STICK_EXPORT_ROOT` optional. AssetRipper (GPL-3.0) is downloaded or user-supplied, never bundled. Later option: replace it with a native Rust reader of the Unity 5.1 serialized files.

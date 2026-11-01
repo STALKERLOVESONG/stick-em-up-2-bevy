@@ -142,6 +142,22 @@ pub struct Projectile {
     pending: Option<PendingContact>,
 }
 
+/// `Seeker`: what a seeking projectile steers towards (the nearest `Targetable` when it was
+/// spawned, followed for the rest of its flight) and how fast it may turn.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Seeking {
+    target: SeekTarget,
+    max_degrees_per_second: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SeekTarget {
+    /// A player's `Man`: its "Target" child.
+    Avatar(Entity),
+    /// A player helicopter's "Target".
+    Helicopter(Entity),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Exploded {
     despawn_next_frame: bool,
@@ -417,6 +433,7 @@ fn fire_weapons(
 
 /// What every new projectile does on `OnSpawned` / `OnEnable`: take a pool instance
 /// (`NetworkPool.Spawn`), start its `LifetimeParticleSystem` trail and its `LifetimeSound`.
+#[allow(clippy::too_many_arguments)]
 fn start_projectiles(
     mut commands: Commands,
     level: Res<ActiveLevel>,
@@ -424,8 +441,33 @@ fn start_projectiles(
     mut pools: ResMut<ProjectilePools>,
     mut new: Query<(Entity, &mut Projectile), Added<Projectile>>,
     mut sounds: MessageWriter<PlaySound>,
+    players: Query<(Entity, &Avatar, &Mortal), With<ControlledBy>>,
+    helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
 ) {
     for (entity, mut projectile) in &mut new {
+        // `Seeker.OnSpawned`: the first target of its `Targeter` (`DistanceTargetSorter`, no
+        // qualifiers): the nearest enabled `Targetable`, i.e. a player's or a player
+        // helicopter's "Target".
+        if let Some(max_degrees_per_second) = projectile.spec.seeker {
+            let from = projectile.shot.position;
+            let avatars = players.iter().filter(|(_, _, m)| m.avatar_active()).map(|(e, a, _)| {
+                let p = a.position();
+                (SeekTarget::Avatar(e), SimVec2::new(p.x, p.y + crate::camera::CAMERA_TARGET_HEIGHT))
+            });
+            let helis = helicopters.iter().filter_map(|(e, h)| h.target_candidate().map(|c| (SeekTarget::Helicopter(e), SimVec2::new(c.position.x, c.position.y))));
+            // Helicopter targets registered first (scene objects), then the avatars; the first of
+            // equal distances wins.
+            let nearest = helis.chain(avatars).fold(None::<(SeekTarget, f32)>, |best, (target, at)| {
+                let d = (at - from).sqr_magnitude();
+                match best {
+                    Some((_, b)) if b <= d => best,
+                    _ => Some((target, d)),
+                }
+            });
+            if let Some((target, _)) = nearest {
+                commands.entity(entity).insert(Seeking { target, max_degrees_per_second });
+            }
+        }
         let reused = pools.take(&projectile.spec.guid);
         projectile.reused = reused || prepooled(&level, &projectile.spec.guid);
         commands.entity(entity).insert(PoolMember(projectile.spec.guid.clone()));
@@ -565,12 +607,14 @@ pub(crate) fn expire_projectiles(
 pub(crate) fn step_projectiles(
     clock: Res<FrameClock>,
     collision: Res<Collision>,
-    mut projectiles: Query<(Entity, &mut Projectile)>,
+    mut projectiles: Query<(Entity, &mut Projectile, Option<&Seeking>)>,
     bodies: Query<(Entity, &Avatar, &Mortal, Option<&Posed>)>,
     mut damage: MessageWriter<Damage>,
     mut level_hits: MessageWriter<crate::letters::LevelColliderHit>,
     helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
     mut helicopter_hits: MessageWriter<crate::helicopter::HelicopterHit>,
+    cars: Query<(Entity, &crate::cars::Car)>,
+    mut car_hits: MessageWriter<crate::cars::CarHit>,
     mut exploded: MessageWriter<ProjectileExploded>,
     swings: Query<&MeleeSwing>,
 ) {
@@ -582,11 +626,27 @@ pub(crate) fn step_projectiles(
     // Helicopter hulls (rotated pieces relative to the body) come after the characters.
     let helis: Vec<(Entity, &crate::helicopter::Helicopter)> = helicopters.iter().filter(|(_, h)| h.is_target()).collect();
     targets.extend(helis.iter().map(|(_, h)| ShotTarget { position: h.body.position, shape: &h.shape, layer: h.layer }));
-    for (entity, mut projectile) in &mut projectiles {
+    // Then the cars' chassis.
+    let car_list: Vec<(Entity, &crate::cars::Car)> = cars.iter().filter(|(_, c)| c.is_target()).collect();
+    targets.extend(car_list.iter().map(|(_, c)| ShotTarget { position: c.position(), shape: &c.shape, layer: c.layer }));
+    for (entity, mut projectile, seeking) in &mut projectiles {
         for &dt in &clock.steps {
             if projectile.exploded.is_some() {
                 projectile.shot.coast(collision.rules.gravity, dt);
                 continue;
+            }
+            // `Seeker.FixedUpdate`, while its target is active.
+            if let Some(seeking) = seeking {
+                let target = match seeking.target {
+                    SeekTarget::Avatar(e) => bodies.get(e).ok().filter(|(_, _, m, _)| m.avatar_active()).map(|(_, a, _, _)| {
+                        let p = a.position();
+                        SimVec2::new(p.x, p.y + crate::camera::CAMERA_TARGET_HEIGHT)
+                    }),
+                    SeekTarget::Helicopter(e) => helicopters.get(e).ok().and_then(|(_, h)| h.target_candidate()).map(|c| SimVec2::new(c.position.x, c.position.y)),
+                };
+                if let Some(target) = target {
+                    projectile.shot.seek(target, seeking.max_degrees_per_second, dt);
+                }
             }
             if projectile.pending.is_some_and(|p| p.hold) {
                 continue;
@@ -603,6 +663,14 @@ pub(crate) fn step_projectiles(
             let Some(hit) = projectile.shot.fixed_step(&collision.world, &collision.rules, &targets, dt) else { continue };
             let amount = projectile.shot.damage;
             let (anchor, collided_with) = match hit {
+                Hit::Target(index) if index >= active.len() + helis.len() => {
+                    let (car, c) = car_list[index - active.len() - helis.len()];
+                    car_hits.write(crate::cars::CarHit { car, amount });
+                    // TODO(UNCERTAIN): the parts of a projectile exploding on a car stay where
+                    // it hit instead of riding on the car.
+                    let _ = c;
+                    (AnchorRef::Collider(crate::cars::CAR_COLLIDER_BASE), Anchor::IDENTITY)
+                }
                 Hit::Target(index) if index >= active.len() => {
                     let (heli, h) = helis[index - active.len()];
                     helicopter_hits.write(crate::helicopter::HelicopterHit { helicopter: heli, amount });

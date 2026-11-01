@@ -1,13 +1,13 @@
 //! Player settings (not in the original, which had none on desktop): music and sound volume,
-//! fullscreen, vertical sync. Chosen in the launcher (the game has no settings screen), read from
-//! `Settings.txt` next to the save files (`sticks_sim::options`) and applied to the window and
+//! window mode (windowed, borderless, fullscreen), vertical sync. Chosen in the launcher (the
+//! game has no settings screen), read from `Settings.txt` next to the save files (`sticks_sim::options`) and applied to the window and
 //! the audio.
 //!
 //! Also the options a launcher started the game with ([`Launch`]).
 
 use bevy::prelude::*;
-use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode};
-pub use sticks_sim::options::{Cheats, LaunchOptions, Settings};
+use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, VideoModeSelection, WindowMode};
+pub use sticks_sim::options::{Cheats, DisplayMode, LaunchOptions, Settings};
 
 use crate::lobby::LobbyMemory;
 
@@ -55,7 +55,11 @@ fn apply_settings(memory: Res<LobbyMemory>, mut windows: Query<&mut Window, With
         }
     }
     let Ok(mut window) = windows.single_mut() else { return };
-    let mode = if settings.fullscreen { WindowMode::BorderlessFullscreen(MonitorSelection::Current) } else { WindowMode::Windowed };
+    let mode = match settings.display {
+        DisplayMode::Windowed => WindowMode::Windowed,
+        DisplayMode::Borderless => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+        DisplayMode::Fullscreen => WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current),
+    };
     if window.mode != mode {
         window.mode = mode;
     }

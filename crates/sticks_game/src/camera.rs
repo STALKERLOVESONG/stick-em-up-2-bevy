@@ -40,7 +40,7 @@ pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::InGame), spawn_camera)
-            .add_systems(Update, camera_late_update.in_set(FrameSet::Camera))
+            .add_systems(Update, (change_minimum_distance, camera_late_update).chain().in_set(FrameSet::Camera))
             .add_systems(Update, sync_camera_transform.in_set(FrameSet::Present));
     }
 }
@@ -82,6 +82,7 @@ fn camera_late_update(
     // they are assumed not to.
     mut avatars: Query<(&Avatar, &Mortal, &mut CameraPlaceholder), Without<Enemy>>,
     helicopters: Query<&crate::helicopter::Helicopter>,
+    cars: Query<&crate::cars::Car>,
     mut rigs: Query<&mut Rig>,
 ) {
     let aspect = windows.single().map_or(16.0 / 9.0, |w| w.width() / w.height());
@@ -91,6 +92,11 @@ fn camera_late_update(
             if mortal.avatar_active() {
                 let p = avatar.position();
                 rig.add_influence(SimVec2::new(p.x, p.y + CAMERA_TARGET_HEIGHT));
+                // The respawner's placeholder only stands in while the avatar is gone. A remote
+                // player's avatar comes back from the network without this machine seeing its
+                // `Respawned` event, which left the placeholder where it died (in the abyss) and
+                // dragged the camera out.
+                placeholder.position = None;
             }
             if let Some(p) = placeholder.position {
                 rig.add_influence(p);
@@ -105,8 +111,62 @@ fn camera_late_update(
                 rig.add_influence(p);
             }
         }
+        // A driven car's "Camera Influencer" and `Rigidbody2DPathCameraInfluencer`.
+        for car in &cars {
+            if let Some(p) = car.camera_influence() {
+                rig.add_influence(p);
+            }
+            if let Some(p) = car.path_influence() {
+                rig.add_distance_only_influence(p);
+            }
+        }
         rig.late_update(aspect, delta);
     }
+}
+
+/// `Changer<MinimumCameraDistanceChanger>.Update` (Japan, Pirates, Skyline, Skyline 2): the
+/// last changer (in x order) that a player has passed sets the camera's minimum distance; a
+/// changer stays passed until every player is more than 10 units behind it (hysteresis); with
+/// none passed the level's own minimum distance applies. `EndOfLevelCameraMover` disables them
+/// all (recognised here by its framing: no edge margin and no minimum width).
+fn change_minimum_distance(
+    level: Res<crate::level::ActiveLevel>,
+    avatars: Query<(&Avatar, &Mortal), With<crate::player::ControlledBy>>,
+    helicopters: Query<&crate::helicopter::Helicopter>,
+    mut rigs: Query<&mut Rig, With<LevelCamera>>,
+    mut state: Local<Option<(String, f32, Vec<bool>)>>,
+) {
+    let changers = &level.0.distance_changers;
+    if changers.is_empty() {
+        return;
+    }
+    let Ok(mut rig) = rigs.single_mut() else { return };
+    if state.as_ref().is_none_or(|(name, _, _)| *name != level.0.name) {
+        *state = Some((level.0.name.clone(), rig.settings.minimum_distance, vec![false; changers.len()]));
+    }
+    let Some((_, default, passed)) = state.as_mut() else { return };
+    if rig.settings.screen_edge_margin == 0.0 && rig.settings.minimum_on_screen_width == 0.0 {
+        return;
+    }
+    // `Player.Controlling`: the player's own `Man`, or the vehicle it flies.
+    let xs: Vec<f32> = avatars
+        .iter()
+        .filter(|(_, m)| m.avatar_active())
+        .map(|(a, _)| a.position().x)
+        .chain(helicopters.iter().filter(|h| h.pilot().is_some()).map(|h| h.body.position.x))
+        .collect();
+    let mut chosen = None;
+    for (i, &(x, distance)) in changers.iter().enumerate() {
+        let ahead = xs.iter().any(|&p| p > x);
+        let all_behind = !xs.iter().any(|&p| p > x - 10.0);
+        if ahead || (passed[i] && !all_behind) {
+            chosen = Some(distance);
+            passed[i] = true;
+        } else {
+            passed[i] = false;
+        }
+    }
+    rig.settings.minimum_distance = chosen.unwrap_or(*default);
 }
 
 fn sync_camera_transform(mut cameras: Query<(&Rig, &mut Transform), With<LevelCamera>>) {

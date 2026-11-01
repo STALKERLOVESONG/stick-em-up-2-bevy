@@ -327,26 +327,35 @@ fn build_scenery(
 ) {
     let assets_dir = config.assets_dir();
     let mut load = TextureLoad::new(&assets_dir, &asset_server, &mut images, &mut materials);
-    let mut libraries: HashMap<String, SpriteLibrary> = HashMap::new();
+    // A collection that fails to load is remembered as `None` so it is tried (and reported) once,
+    // not once per sprite.
+    let mut libraries: HashMap<String, Option<SpriteLibrary>> = HashMap::new();
     for sprite in &level.0.sprites {
-        if !libraries.contains_key(&sprite.collection) {
-            match SpriteLibrary::load(&assets_dir, &sprite.collection) {
-                Ok(lib) => {
-                    libraries.insert(sprite.collection.clone(), lib);
-                }
-                Err(e) => warn!("sprite collection {}: {e}", sprite.collection),
+        libraries.entry(sprite.collection.clone()).or_insert_with(|| match SpriteLibrary::load(&assets_dir, &sprite.collection) {
+            Ok(lib) => Some(lib),
+            Err(e) => {
+                warn!("sprite collection {}: {e}", sprite.collection);
+                None
             }
-        }
+        });
     }
     // Helicopters draw their own sprites (they move with the body).
-    let helicopter_roots: Vec<_> = level.0.helicopters.iter().map(|h| h.root).collect();
+    // Helicopters and cars draw their own sprites (they move with their bodies).
+    let helicopter_roots: Vec<_> = level.0.helicopters.iter().map(|h| h.root).chain(level.0.cars.iter().map(|c| c.root)).collect();
     // `HorizontalScroller2D` bodies carry their sprites (`crate::scenery`).
-    let follow = |s: &unity_data::sprites::SceneSprite| s.rigid_root.and_then(|r| level.0.scrollers.iter().position(|sc| sc.object == r));
+    // Then the `Wave` sprites (and their shadow copies), after the scrollers (`crate::scenery`).
+    let wave_of = |o: unity_data::scene::FileId| level.0.waves.iter().position(|w| w.object == o).map(|i| level.0.scrollers.len() + i);
+    let follow = |s: &unity_data::sprites::SceneSprite| {
+        s.rigid_root
+            .and_then(|r| level.0.scrollers.iter().position(|sc| sc.object == r))
+            .or_else(|| wave_of(s.object))
+            .or_else(|| s.shadow_of.and_then(|(c, _)| level.0.sprites.get(c)).and_then(|c| wave_of(c.object)))
+    };
     let art = LevelArt::build_following(
         &level.0.sprites,
         |s| s.rigid_root.is_some_and(|r| helicopter_roots.contains(&r)),
         follow,
-        |guid| libraries.get(guid),
+        |guid| libraries.get(guid).and_then(Option::as_ref),
         |path| textures.id(path, &mut load),
     );
 
