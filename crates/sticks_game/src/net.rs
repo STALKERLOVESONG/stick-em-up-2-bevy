@@ -93,6 +93,9 @@ pub struct LoadCommand {
 pub const LOBBY_LEVEL: &str = "Lobby";
 pub const COMPLETE_LEVEL: &str = "Complete";
 
+/// The "Complete" ending scene (`LevelLoader.GameComplete` loads it like any level).
+pub const COMPLETE_SCENE: &str = "Assets/Game/Levels/Complete/Complete.unity";
+
 /// A line of a room's chat; `from` is `None` for the room's own notices (joins, leaves).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatLine {
@@ -1286,12 +1289,12 @@ fn perform_loads(
     mut next: ResMut<NextState<AppState>>,
     state: Res<State<AppState>>,
 ) {
-    let Some(command) = net.load.take() else { return };
-    if command.level == LOBBY_LEVEL || command.level == COMPLETE_LEVEL {
-        if command.level == COMPLETE_LEVEL {
-            // TODO: the "Complete" ending scene is not reconstructed (see `menu`).
-            warn!("campaign complete: the ending scene is not reconstructed; back to the Lobby");
-        }
+    let Some(mut command) = net.load.take() else { return };
+    // `LevelLoader.GameComplete`: the ending scene loads like a level.
+    if command.level == COMPLETE_LEVEL {
+        command.level = COMPLETE_SCENE.to_owned();
+    }
+    if command.level == LOBBY_LEVEL {
         net.level_seed = None;
         if *state.get() != AppState::Lobby {
             next.set(AppState::Lobby);

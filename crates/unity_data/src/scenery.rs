@@ -98,6 +98,99 @@ pub fn waves(scene: &Scene, scripts: &ScriptIndex) -> Vec<WaveSpec> {
         .collect()
 }
 
+/// `Whale` (Pirates): a kinematic body that waits `start_wait_time`, then forever waits
+/// `down_time`, rises `up_y_offset` in `transition_time` (`Mathf.SmoothStep`), waits `up_time`
+/// and sinks back. Its polygon collider is in [`crate::level::Level::colliders`] (object
+/// [`WhaleSpec::object`], a dynamic collider), its sprites follow it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhaleSpec {
+    pub object: FileId,
+    pub up_time: f32,
+    pub down_time: f32,
+    pub transition_time: f32,
+    pub up_y_offset: f32,
+    pub start_wait_time: f32,
+}
+
+/// Every active, enabled `Whale`.
+pub fn whales(scene: &Scene, scripts: &ScriptIndex) -> Vec<WhaleSpec> {
+    scene
+        .game_objects()
+        .into_iter()
+        .filter(|go| go.active_in_hierarchy())
+        .filter_map(|go| {
+            let b = &mono(&go, scripts, "Whale")?.body;
+            if !b.bool_of("m_Enabled").unwrap_or(true) {
+                return None;
+            }
+            Some(WhaleSpec {
+                object: go.id(),
+                up_time: b.f32_of("upTime").unwrap_or(4.0),
+                down_time: b.f32_of("downTime").unwrap_or(4.0),
+                transition_time: b.f32_of("transitionTime").unwrap_or(1.0),
+                up_y_offset: b.f32_of("upYOffset").unwrap_or(14.0),
+                start_wait_time: b.f32_of("startWaitTime").unwrap_or(0.0),
+            })
+        })
+        .collect()
+}
+
+/// `StarShower` (Moon): stars fall on a random `Targetable` whose x is in `[start_x, end_x]`,
+/// at a rate per second rising from `start_rate` to `peak_rate` over `[start_x, peak_start_x]`,
+/// holding to `peak_end_x` and falling to `end_rate` at `end_x`; ×`vehicle_rate_multiplier` (rate
+/// and spread) on a car; × the number of targets. Each star (`prefab`) starts `launch_offset_y`
+/// above the target, ahead by where `launch_velocity` and gravity bring it down to the target's
+/// height, spread ±`random_range / 2` in x, spinning between the two angular velocities.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StarShowerSpec {
+    pub prefab: String,
+    pub start_x: f32,
+    pub peak_start_x: f32,
+    pub peak_end_x: f32,
+    pub end_x: f32,
+    pub start_rate: f32,
+    pub peak_rate: f32,
+    pub end_rate: f32,
+    pub vehicle_rate_multiplier: f32,
+    pub launch_angular_velocity_min: f32,
+    pub launch_angular_velocity_max: f32,
+    pub launch_velocity: [f32; 2],
+    pub launch_offset_y: f32,
+    pub random_range: f32,
+}
+
+/// Every active, enabled `StarShower`.
+pub fn star_showers(scene: &Scene, scripts: &ScriptIndex) -> Vec<StarShowerSpec> {
+    scene
+        .game_objects()
+        .into_iter()
+        .filter(|go| go.active_in_hierarchy())
+        .filter_map(|go| {
+            let b = &mono(&go, scripts, "StarShower")?.body;
+            if !b.bool_of("m_Enabled").unwrap_or(true) {
+                return None;
+            }
+            let f = |k: &str, d: f32| b.f32_of(k).unwrap_or(d);
+            Some(StarShowerSpec {
+                prefab: b.get("prefab").and_then(Value::guid)?.to_owned(),
+                start_x: f("startX", 0.0),
+                peak_start_x: f("peakStartX", 10.0),
+                peak_end_x: f("peakEndX", 20.0),
+                end_x: f("endX", 30.0),
+                start_rate: f("startRate", 0.5),
+                peak_rate: f("peakRate", 8.0),
+                end_rate: f("endRate", 0.5),
+                vehicle_rate_multiplier: f("vehicleRateMultiplier", 1.5),
+                launch_angular_velocity_min: f("launchAngularVelocityMin", -229.18312),
+                launch_angular_velocity_max: f("launchAngularVelocityMax", -57.29578),
+                launch_velocity: b.get("launchVelocity").and_then(Value::as_vec2).map_or([-2.0, -1.0], |(x, y)| [x, y]),
+                launch_offset_y: f("launchOffsetY", 20.0),
+                random_range: f("randomRange", 60.0),
+            })
+        })
+        .collect()
+}
+
 /// A breakable level object: `Health` → `ExplodeOnHealthExhausted` → `Explodable.Explode` →
 /// `ExplodeSpritesAndLines` (its sprites fly apart), `PlaySoundOnExplode`, and
 /// `DestroyOnExplosionFinished`.
@@ -120,6 +213,8 @@ pub struct LevelProp {
     /// is only switched off).
     pub fade_wait_time: Option<f32>,
     pub destroy_on_finished: bool,
+    /// `DestroyAllForGoal`: destroying every such prop alone gives "<level> all destroyed".
+    pub destroy_all_for_goal: bool,
     /// `SetLayerInCampaignMode.layer`.
     pub campaign_layer: Option<u8>,
 }
@@ -228,6 +323,7 @@ pub fn props(scene: &Scene, scripts: &ScriptIndex, colliders: &[Collider], sprit
             sound: mono(&go, scripts, "PlaySoundOnExplode").and_then(|m| m.body.str_of("sound")).map(str::to_owned),
             fade_wait_time: mono(&go, scripts, "ExplodeSpritesAndLines").map(|m| m.body.f32_of("fadeWaitTime").unwrap_or(2.0)),
             destroy_on_finished: mono(&go, scripts, "DestroyOnExplosionFinished").is_some(),
+            destroy_all_for_goal: mono(&go, scripts, "DestroyAllForGoal").is_some(),
             campaign_layer: mono(&go, scripts, "SetLayerInCampaignMode").and_then(|m| m.body.i64_of("layer")).map(|l| l as u8),
         });
     }

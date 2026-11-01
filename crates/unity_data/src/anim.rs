@@ -180,6 +180,73 @@ pub fn parse_clip(text: &str) -> Option<Clip> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Generic transform clips (the weapons' firing animations)
+// ---------------------------------------------------------------------------------------------
+
+/// A non-humanoid clip that moves and turns transforms below the animated object: the weapons'
+/// firing animations ("Sword Swing", "Shuriken Throw", "Spear Throw"), played by the weapon
+/// pivot's own `Animator` when its `ProjectileLauncher` fires (`firingAnimator.SetTrigger`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TransformClip {
+    pub name: String,
+    /// `m_StopTime - m_StartTime`.
+    pub length: f32,
+    /// `m_PositionCurves`: the path below the animated object and x, y, z.
+    pub positions: Vec<(String, [Curve; 3])>,
+    /// `m_RotationCurves`: the path and the quaternion's x, y, z, w.
+    pub rotations: Vec<(String, [Curve; 4])>,
+}
+
+fn parse_vector_curves<const N: usize>(entries: &[Value]) -> Vec<(String, [Curve; N])> {
+    const AXES: [&str; 4] = ["x", "y", "z", "w"];
+    entries
+        .iter()
+        .map(|entry| {
+            let path = entry.str_of("path").unwrap_or("").to_owned();
+            let keys = entry.get("curve").and_then(|c| c.get("m_Curve")).map(Value::as_seq).unwrap_or(&[]);
+            let curves = std::array::from_fn(|axis| Curve {
+                keys: keys
+                    .iter()
+                    .filter_map(|k| {
+                        let pick = |name: &str| k.get(name).and_then(|v| v.f32_of(AXES[axis]));
+                        Some(Keyframe { time: k.f32_of("time")?, value: pick("value")?, in_slope: pick("inSlope").unwrap_or(0.0), out_slope: pick("outSlope").unwrap_or(0.0) })
+                    })
+                    .collect(),
+            });
+            (path, curves)
+        })
+        .collect()
+}
+
+/// Read a [`TransformClip`] (`.anim` text).
+pub fn parse_transform_clip(text: &str) -> Option<TransformClip> {
+    let docs = yaml::parse_documents(text);
+    let body = &docs.iter().find(|d| d.type_name == "AnimationClip")?.body;
+    let settings = body.get("m_AnimationClipSettings");
+    let start = settings.and_then(|s| s.f32_of("m_StartTime")).unwrap_or(0.0);
+    let stop = settings.and_then(|s| s.f32_of("m_StopTime")).unwrap_or(0.0);
+    Some(TransformClip {
+        name: body.str_of("m_Name").unwrap_or("").to_owned(),
+        length: stop - start,
+        positions: parse_vector_curves::<3>(body.get("m_PositionCurves").map(Value::as_seq).unwrap_or(&[])),
+        rotations: parse_vector_curves::<4>(body.get("m_RotationCurves").map(Value::as_seq).unwrap_or(&[])),
+    })
+}
+
+/// The firing animation of the rig weapon `weapon` ("Sword" → "Sword Swing.anim", "Shuriken" /
+/// "Spear" → "… Throw.anim").
+///
+/// TODO(UNCERTAIN): the weapon pivots' animator controllers were not exported; each clip is
+/// matched to its weapon by name, and played once from its start on every shot (the controllers'
+/// transitions and their timing are not known).
+pub fn load_weapon_action(assets_dir: &Path, weapon: &str) -> Option<TransformClip> {
+    ["Swing", "Throw"].iter().find_map(|verb| {
+        let text = std::fs::read_to_string(assets_dir.join("AnimationClip").join(format!("{weapon} {verb}.anim"))).ok()?;
+        parse_transform_clip(&text)
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
 // Animator controller
 // ---------------------------------------------------------------------------------------------
 

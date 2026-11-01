@@ -171,6 +171,13 @@ fn color_of(v: Option<&Value>) -> [f32; 4] {
 /// Parse a projectile prefab. Fixed `tk2dSprite`s keep an empty `sprite_name` (see
 /// [`try_load_projectile`], which resolves them).
 pub fn parse_projectile(scene: &Scene, scripts: &ScriptIndex) -> Option<ProjectileSpec> {
+    parse_projectile_with(scene, scripts, true)
+}
+
+/// [`parse_projectile`]; with `require_projectile` false a body without a `Projectile` script is
+/// read too (Moon's falling "Star": a rigid body launched by `StarShower` with its own velocity,
+/// not propelled).
+pub fn parse_projectile_with(scene: &Scene, scripts: &ScriptIndex, require_projectile: bool) -> Option<ProjectileSpec> {
     let objects = scene.game_objects();
     let root = *objects.iter().find(|g| g.parent().is_none())?;
     let mut spec = ProjectileSpec {
@@ -286,7 +293,10 @@ pub fn parse_projectile(scene: &Scene, scripts: &ScriptIndex) -> Option<Projecti
         }
     }
     if !have_projectile {
-        return None;
+        if require_projectile {
+            return None;
+        }
+        spec.propelled = false;
     }
     for go in &objects {
         // Sprites under a "Sprite Shadow" object are the shadow copies `SpriteShadower` drives.
@@ -357,11 +367,16 @@ pub fn parse_projectile(scene: &Scene, scripts: &ScriptIndex) -> Option<Projecti
 /// flying object). Fixed `tk2dSprite`s get their sprite names from their collections when those
 /// can be found.
 pub fn try_load_projectile(assets_dir: &Path, guid: &str) -> std::io::Result<Option<ProjectileSpec>> {
+    try_load_projectile_with(assets_dir, guid, true)
+}
+
+/// [`try_load_projectile`]; see [`parse_projectile_with`] for `require_projectile`.
+pub fn try_load_projectile_with(assets_dir: &Path, guid: &str, require_projectile: bool) -> std::io::Result<Option<ProjectileSpec>> {
     let prefabs = GuidIndex::scan(&assets_dir.join("GameObject"), "prefab");
     let path = prefabs.path(guid).ok_or_else(|| std::io::Error::other(format!("no prefab with guid {guid}")))?;
     let scripts = ScriptIndex::scan(&assets_dir.join("Scripts"));
     let scene = Scene::load(path)?;
-    let Some(mut spec) = parse_projectile(&scene, &scripts) else { return Ok(None) };
+    let Some(mut spec) = parse_projectile_with(&scene, &scripts, require_projectile) else { return Ok(None) };
     spec.guid = guid.to_owned();
     let mut libraries: Vec<(String, Option<crate::sprites::SpriteLibrary>)> = Vec::new();
     for sprite in &mut spec.sprites {

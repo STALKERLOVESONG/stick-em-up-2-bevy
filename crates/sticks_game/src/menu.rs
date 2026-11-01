@@ -75,7 +75,7 @@ fn load_requests(
     mut next: ResMut<NextState<AppState>>,
     mut net: ResMut<crate::net::Net>,
     session: Res<crate::state::Session>,
-    source: Res<crate::level::LevelSource>,
+    mut source: ResMut<crate::level::LevelSource>,
 ) {
     let Some(&request) = requests.read().last() else { return };
     // In a network game loads go through the host, which loads them everywhere
@@ -116,13 +116,15 @@ fn load_requests(
             let count = memory.campaign_levels.len();
             if count > 0 && memory.level_index + 1 >= count {
                 memory.level_index = 0;
-                // TODO: `LevelLoader.GameComplete()` loads the "Complete" ending scene, which is
-                // not reconstructed; the Lobby is shown instead.
-                warn!("campaign complete: the ending scene is not reconstructed; back to the Lobby");
+                // `LevelLoader.GameComplete()`: the "Complete" ending scene, same players and
+                // difficulty.
+                info!("campaign complete: loading the ending scene");
+                source.0 = crate::net::COMPLETE_SCENE.to_owned();
+                next.set(AppState::Loading);
             } else {
                 memory.level_index += 1;
+                next.set(AppState::Lobby);
             }
-            next.set(AppState::Lobby);
         }
     }
 }

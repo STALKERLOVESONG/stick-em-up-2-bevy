@@ -50,8 +50,36 @@ pub struct HelicopterGun {
     pub firing_sound: String,
     /// The gun has its own `ControlSlot` (a gunner seat; players' helicopters only).
     pub control_slot: bool,
+    /// That `ControlSlot.controlRadius`.
+    pub control_radius: f32,
     /// File id of the `HelicopterGunnerControl` component.
     pub component: FileId,
+    /// `HelicopterGunnerControl.gunner`: the node of the `VehicleOccupant` that shows the gunner.
+    pub occupant: Option<usize>,
+    /// `MoveToOtherControlSlotIfAvailable` on the seat: its gunner takes the pilot's seat when it
+    /// is free.
+    pub moves_to_pilot: bool,
+}
+
+/// A vehicle root's enabled `AudioSource` (its engine loop).
+fn looping_sound(root: &GameObject<'_>) -> Option<LoopingSound> {
+    root.component(class::AUDIO_SOURCE).filter(|c| c.body.bool_of("m_Enabled").unwrap_or(true)).and_then(|c| {
+        let b = &c.body;
+        let clip = b.get("m_audioClip").and_then(Value::guid)?.to_owned();
+        let spatial_blend = b.get("panLevelCustomCurve").and_then(|c| c.get("m_Curve")).map(Value::as_seq).and_then(|keys| keys.first()).and_then(|k| k.f32_of("value")).unwrap_or(0.0);
+        Some(LoopingSound {
+            clip,
+            volume: b.f32_of("m_Volume").unwrap_or(1.0),
+            pitch: b.f32_of("m_Pitch").unwrap_or(1.0),
+            play_on_awake: b.bool_of("m_PlayOnAwake").unwrap_or(true),
+            looping: b.bool_of("Loop").unwrap_or(false),
+            min_distance: b.f32_of("MinDistance").unwrap_or(1.0),
+            max_distance: b.f32_of("MaxDistance").unwrap_or(500.0),
+            rolloff: b.i64_of("rolloffMode").unwrap_or(0),
+            spatial_blend,
+            mixer_group: b.get("OutputAudioMixerGroup").and_then(Value::file_id).filter(|&f| f != 0),
+        })
+    })
 }
 
 /// A looping `AudioSource` on a vehicle (the engine).
@@ -284,7 +312,16 @@ pub fn helicopters(scene: &Scene, scripts: &ScriptIndex) -> Vec<HelicopterSpawn>
                                 firing_rate_scaling: scaling,
                                 firing_sound: lb.str_of("firingSound").unwrap_or("").to_owned(),
                                 control_slot: script(go, scripts, "ControlSlot").is_some(),
+                                control_radius: script(go, scripts, "ControlSlot").and_then(|s| s.body.f32_of("controlRadius")).unwrap_or(10.0),
                                 component: c.file_id,
+                                occupant: b
+                                    .get("gunner")
+                                    .and_then(Value::file_id)
+                                    .and_then(|id| scene.get(id))
+                                    .and_then(|d| d.body.get("m_GameObject"))
+                                    .and_then(Value::file_id)
+                                    .and_then(node_of),
+                                moves_to_pilot: script(go, scripts, "MoveToOtherControlSlotIfAvailable").is_some(),
                             });
                         }
                     }
@@ -345,23 +382,7 @@ pub fn helicopters(scene: &Scene, scripts: &ScriptIndex) -> Vec<HelicopterSpawn>
         let single_player_gun = control.and_then(|c| c.get("singlePlayerGunnerControl")).and_then(Value::file_id).and_then(|id| guns.iter().position(|g| g.component == id));
         let camera_influencer = objects.iter().position(|go| script(go, scripts, "CameraPositionInfluencer").is_some());
         let target = objects.iter().position(|go| script(go, scripts, "Targetable").is_some()).filter(|&i| !(removes_player_parts && nodes[i].name == "Target" && nodes[i].parent == Some(0)));
-        let engine_sound = root.component(class::AUDIO_SOURCE).filter(|c| c.body.bool_of("m_Enabled").unwrap_or(true)).and_then(|c| {
-            let b = &c.body;
-            let clip = b.get("m_audioClip").and_then(Value::guid)?.to_owned();
-            let spatial_blend = b.get("panLevelCustomCurve").and_then(|c| c.get("m_Curve")).map(Value::as_seq).and_then(|keys| keys.first()).and_then(|k| k.f32_of("value")).unwrap_or(0.0);
-            Some(LoopingSound {
-                clip,
-                volume: b.f32_of("m_Volume").unwrap_or(1.0),
-                pitch: b.f32_of("m_Pitch").unwrap_or(1.0),
-                play_on_awake: b.bool_of("m_PlayOnAwake").unwrap_or(true),
-                looping: b.bool_of("Loop").unwrap_or(false),
-                min_distance: b.f32_of("MinDistance").unwrap_or(1.0),
-                max_distance: b.f32_of("MaxDistance").unwrap_or(500.0),
-                rolloff: b.i64_of("rolloffMode").unwrap_or(0),
-                spatial_blend,
-                mixer_group: b.get("OutputAudioMixerGroup").and_then(Value::file_id).filter(|&f| f != 0),
-            })
-        });
+        let engine_sound = looping_sound(&root);
         let fuselage = script(&root, scripts, "HelicopterColor").and_then(|s| s.body.get("fuselage")).and_then(Value::file_id).and_then(|id| scene.get(id)).and_then(|d| d.body.get("m_GameObject").and_then(Value::file_id)).and_then(node_of);
         out.push(HelicopterSpawn {
             name: root.name().to_owned(),
@@ -428,7 +449,31 @@ pub struct CarTuning {
     pub acceleration_body_torque_factor: f32,
 }
 
-/// A car placed in a level.
+/// `RocketControl`'s tuning (Moon's lunar module): thrust along the body's up from `engine`, and
+/// an angular velocity steered towards `-clockwise × max_angular_velocity`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RocketTuning {
+    /// The `engine` transform (a node index), where the thrust is applied.
+    pub engine: Option<usize>,
+    pub max_acceleration: f32,
+    /// Degrees per second.
+    pub max_angular_velocity: f32,
+    /// Degrees per second².
+    pub max_angular_acceleration: f32,
+    pub engine_particle_rate: f32,
+}
+
+/// A `CarGunnerControl` seat: its `VehicleOccupant` holds `weaponName` (set up on the occupant's
+/// weapon pivots) and aims it with the gunner's input.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarGunner {
+    pub seat: OccupantSeat,
+    pub weapon: String,
+    /// The seat's own `ControlSlot.controlRadius`.
+    pub control_radius: f32,
+}
+
+/// A car placed in a level (also the lunar module: a `RocketControl` body without wheels).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CarSpawn {
     pub name: String,
@@ -442,8 +487,8 @@ pub struct CarSpawn {
     pub wheels: Vec<CarWheel>,
     pub tuning: CarTuning,
     pub driver: Option<OccupantSeat>,
-    /// `CarGunnerControl` seats (a `ControlSlot` each) and the launchers under them.
-    pub gunners: Vec<usize>,
+    /// `CarGunnerControl` seats (a `ControlSlot` each, taken once the driver's is).
+    pub gunners: Vec<CarGunner>,
     pub control_radius: f32,
     pub disembarkment_point: Option<usize>,
     pub camera_influencer: Option<usize>,
@@ -452,6 +497,18 @@ pub struct CarSpawn {
     pub explosion_fade_wait: Option<f32>,
     pub explode_sound: Option<String>,
     pub engine_sound: Option<LoopingSound>,
+    /// `RocketControl` instead of `CarControl`.
+    pub rocket: Option<RocketTuning>,
+    /// Nodes with a `PassengerControl` seat (its own `ControlSlot`, taken once the pilot's is).
+    pub passengers: Vec<usize>,
+    /// `RocketControl.engineParticles`: the first `ParticleSystem` under the engine (the lunar
+    /// module's "Emissions") and its node.
+    pub exhaust: Option<(usize, crate::particles::ParticleEffectSpec)>,
+    /// `GroundRaycastCameraInfluencer` on the root (the lunar module).
+    pub ground_raycast_camera: bool,
+    /// `TellOwnerToExplodeOnHealthExhausted` on the root: an exhausted vehicle explodes (the
+    /// lunar module has `Health` but nothing that acts on it).
+    pub explodes: bool,
 }
 
 impl CarSpawn {
@@ -493,7 +550,8 @@ pub fn cars(scene: &Scene, scripts: &ScriptIndex) -> Vec<CarSpawn> {
         if !root.active_in_hierarchy() {
             continue;
         }
-        let Some(control) = script(&root, scripts, "CarControl") else { continue };
+        let rocket_control = script(&root, scripts, "RocketControl");
+        let Some(control) = script(&root, scripts, "CarControl").or(rocket_control) else { continue };
         let mut nodes: Vec<VehicleNode> = Vec::new();
         let mut objects: Vec<GameObject<'_>> = Vec::new();
         let mut stack: Vec<(GameObject<'_>, Option<usize>)> = vec![(root, None)];
@@ -572,7 +630,21 @@ pub fn cars(scene: &Scene, scripts: &ScriptIndex) -> Vec<CarSpawn> {
                             enabled: c.body.bool_of("m_Enabled").unwrap_or(true),
                         });
                     }
-                    Some("CarGunnerControl") => gunners.push(i),
+                    Some("CarGunnerControl") => {
+                        // `[RequireComponent(typeof(VehicleOccupant))]`: the occupant is on the same object.
+                        let occupant = go.components().into_iter().find(|o| o.class_id == class::MONO_BEHAVIOUR && class_of(o, scripts) == Some("VehicleOccupant"));
+                        let slot = go.components().into_iter().find(|o| o.class_id == class::MONO_BEHAVIOUR && class_of(o, scripts) == Some("ControlSlot"));
+                        gunners.push(CarGunner {
+                            seat: OccupantSeat {
+                                node: i,
+                                prefab: occupant.and_then(|o| o.body.get("prefab").and_then(Value::guid)).unwrap_or("").to_owned(),
+                                animation_state: occupant.and_then(|o| o.body.str_of("animationState")).unwrap_or("").to_owned(),
+                                enabled: occupant.and_then(|o| o.body.bool_of("m_Enabled")).unwrap_or(false),
+                            },
+                            weapon: c.body.str_of("weaponName").unwrap_or("").to_owned(),
+                            control_radius: slot.and_then(|s| s.body.f32_of("controlRadius")).unwrap_or(10.0),
+                        });
+                    }
                     _ => {}
                 }
             }
@@ -581,6 +653,18 @@ pub fn cars(scene: &Scene, scripts: &ScriptIndex) -> Vec<CarSpawn> {
             .and_then(|s| s.body.f32_of("startingHealth"))
             .or_else(|| script(&root, scripts, "Health").and_then(|s| s.body.f32_of("startingHealth")))
             .unwrap_or(100.0);
+        // `RocketControl.Awake`: `engine.GetComponentInChildren<ParticleSystem>()`.
+        let engine_node = rocket_control.and_then(|r| r.body.get("engine").and_then(Value::file_id).and_then(|t| scene.get(t)).and_then(|t| t.body.get("m_GameObject")).and_then(Value::file_id).and_then(node_of));
+        let under = |mut i: usize, ancestor: usize| loop {
+            if i == ancestor {
+                return true;
+            }
+            match nodes[i].parent {
+                Some(p) => i = p,
+                None => return false,
+            }
+        };
+        let exhaust = engine_node.and_then(|e| objects.iter().enumerate().filter(|(i, _)| under(*i, e)).find_map(|(i, go)| crate::particles::particle_effect_of(go, scripts).map(|spec| (i, spec))));
         out.push(CarSpawn {
             name: root.name().to_owned(),
             root: root.id(),
@@ -605,8 +689,101 @@ pub fn cars(scene: &Scene, scripts: &ScriptIndex) -> Vec<CarSpawn> {
             starting_health: health,
             explosion_fade_wait: script(&root, scripts, "ExplodeSpritesAndLines").map(|d| d.body.f32_of("fadeWaitTime").unwrap_or(2.0)),
             explode_sound: script(&root, scripts, "PlaySoundOnExplode").and_then(|d| d.body.str_of("sound")).filter(|s| !s.is_empty()).map(str::to_owned),
-            engine_sound: None,
+            engine_sound: looping_sound(&root),
+            rocket: rocket_control.map(|r| RocketTuning {
+                engine: engine_node,
+                max_acceleration: r.body.f32_of("maxAcceleration").unwrap_or(20.0),
+                max_angular_velocity: r.body.f32_of("maxAngularVelocity").unwrap_or(60.0),
+                max_angular_acceleration: r.body.f32_of("maxAngularAcceleration").unwrap_or(135.0),
+                engine_particle_rate: r.body.f32_of("engineParticleRate").unwrap_or(500.0),
+            }),
+            passengers: objects.iter().enumerate().filter(|(_, go)| script(go, scripts, "PassengerControl").is_some()).map(|(i, _)| i).collect(),
+            explodes: script(&root, scripts, "TellOwnerToExplodeOnHealthExhausted").is_some(),
+            exhaust,
+            ground_raycast_camera: script(&root, scripts, "GroundRaycastCameraInfluencer").is_some(),
             nodes,
+        });
+    }
+    out
+}
+
+/// A gun emplacement a player operates without leaving their character (`CannonControl` on a
+/// non-exclusive `ControlSlot` with `IdleControllingCharacter`: Pirates' deck cannon). Its
+/// "Pivot" turns to the aim (`HelicopterGunnerInput.RelativeAim`), the launchers under it fire.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CannonSpawn {
+    pub name: String,
+    pub object: FileId,
+    /// World position of the control slot (the cannon object).
+    pub position: [f32; 3],
+    pub control_radius: f32,
+    /// The "Pivot": its world transform as saved and its world rotation about z (degrees).
+    pub pivot: Affine,
+    pub pivot_angle: f32,
+    /// Every object under the pivot and its transform relative to the pivot (the sprites that
+    /// turn with it, the launch points).
+    pub parts: Vec<(FileId, Affine)>,
+    /// The "Barrel" (`CannonColor` tints it with the operator's body colour).
+    pub barrel: Option<FileId>,
+    pub launchers: Vec<CannonLauncher>,
+}
+
+/// A `ProjectileLauncher` under a cannon's pivot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CannonLauncher {
+    /// The launcher's object (its position relative to the pivot is in [`CannonSpawn::parts`]).
+    pub object: FileId,
+    pub projectile: String,
+    pub firing_rate_time: f32,
+    pub fully_automatic: bool,
+    pub firing_rate_scaling: Option<DifficultyScaling>,
+    pub firing_sound: String,
+}
+
+/// Every active `CannonControl`.
+pub fn cannons(scene: &Scene, scripts: &ScriptIndex) -> Vec<CannonSpawn> {
+    let mut out = Vec::new();
+    for root in scene.game_objects() {
+        if !root.active_in_hierarchy() || script(&root, scripts, "CannonControl").is_none() {
+            continue;
+        }
+        let Some(pivot) = root.children().into_iter().find(|c| c.name() == "Pivot") else { continue };
+        let pivot_world = pivot.world_affine();
+        let to_pivot = pivot_world.inverse();
+        let mut parts = Vec::new();
+        let mut launchers = Vec::new();
+        let mut barrel = None;
+        let mut stack = pivot.children();
+        while let Some(go) = stack.pop() {
+            parts.push((go.id(), to_pivot.mul(&go.world_affine())));
+            if go.name() == "Barrel" {
+                barrel = Some(go.id());
+            }
+            if go.active_in_hierarchy() {
+                if let Some(l) = script(&go, scripts, "ProjectileLauncher").filter(|l| l.body.bool_of("m_Enabled").unwrap_or(true)) {
+                    let b = &l.body;
+                    launchers.push(CannonLauncher {
+                        object: go.id(),
+                        projectile: b.get("prefab").and_then(Value::guid).unwrap_or("").to_owned(),
+                        firing_rate_time: b.f32_of("firingRateTime").unwrap_or(0.1),
+                        fully_automatic: b.bool_of("fullyAutomatic").unwrap_or(false),
+                        firing_rate_scaling: script(&go, scripts, "ProjectileLauncherFiringRateTimeDifficultyModifier").map(|m| crate::level::scaling_of(&m.body)),
+                        firing_sound: b.str_of("firingSound").unwrap_or("").to_owned(),
+                    });
+                }
+            }
+            stack.extend(go.children());
+        }
+        out.push(CannonSpawn {
+            name: root.name().to_owned(),
+            object: root.id(),
+            position: root.world_affine().t,
+            control_radius: script(&root, scripts, "ControlSlot").and_then(|s| s.body.f32_of("controlRadius")).unwrap_or(10.0),
+            pivot_angle: pivot_world.m[1][0].atan2(pivot_world.m[0][0]).to_degrees(),
+            pivot: pivot_world,
+            parts,
+            barrel,
+            launchers,
         });
     }
     out

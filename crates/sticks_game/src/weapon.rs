@@ -42,9 +42,16 @@ pub struct Armament {
     projectiles: Vec<String>,
     /// `CharacterControl2D.correctedAim`.
     corrected_aim: SimVec2,
+    /// The weapon whose firing animation plays (`firingAnimator.SetTrigger`) and its time.
+    action: Option<(usize, f32)>,
 }
 
 impl Armament {
+    /// `ProjectileLauncher.ChargeTime` of the equipped weapon.
+    pub(crate) fn charge_time(&self) -> f32 {
+        self.equipped().map_or(0.0, |w| self.launchers[w].charge_time())
+    }
+
     /// The equipped weapon as an index into the rig's weapon list.
     pub fn equipped(&self) -> Option<usize> {
         self.loadout.current()
@@ -141,6 +148,9 @@ pub struct Projectile {
     /// `TellOwnerToExplodeOnCollisionUnlessOtherIsDestroyed`: the contact waits for `LateUpdate`.
     pending: Option<PendingContact>,
 }
+
+/// The anchor id of a sword swing a projectile ended on (it stays where it was struck).
+const SWING_COLLIDER: u32 = 0x7D00_0000;
 
 /// `Seeker`: what a seeking projectile steers towards (the nearest `Targetable` when it was
 /// spawned, followed for the rest of its flight) and how fast it may turn.
@@ -245,6 +255,7 @@ impl Plugin for WeaponPlugin {
                 .after(crate::player::update_characters),
         )
         .add_systems(Update, resolve_pending_contacts.in_set(FrameSet::Present))
+        .add_systems(Update, queue_aim_arcs.in_set(crate::unity_render::QueueSet::Collect).run_if(in_state(AppState::InGame)))
         .add_systems(
             Update,
             (step_swings, step_projectiles).chain().in_set(FrameSet::FixedSteps).after(crate::player::run_fixed_steps).before(crate::life::apply_damage),
@@ -291,7 +302,7 @@ fn attach_armaments(
         let projectiles = settings.into_iter().map(|(_, _, projectile)| projectile).collect();
         let pose = model.pose_character(&avatar.animator.pose(), avatar.position(), avatar.facing_right(), None);
         commands.entity(entity).insert((
-            Armament { loadout: Loadout::new(&names, allowed), launchers, projectiles, corrected_aim: SimVec2::new(1.0, 0.0) },
+            Armament { loadout: Loadout::new(&names, allowed), launchers, projectiles, corrected_aim: SimVec2::new(1.0, 0.0), action: None },
             AimPivot(avatar.position()),
             Posed(pose),
         ));
@@ -315,6 +326,7 @@ fn reload_on_respawn(mut notices: MessageReader<LifeNotice>, mut avatars: Query<
 /// `CorrectAndSetAim` and `OnAnimatorIK`: pose the rig for this frame's animation and aim.
 fn aim_and_pose(
     art: Option<Res<ManArt>>,
+    clock: Res<FrameClock>,
     mut avatars: Query<(&Avatar, &Controls, &Mortal, &mut Armament, &mut Posed, &mut AimPivot, Option<&crate::enemy::DrawZ>)>,
 ) {
     let Some(art) = art else { return };
@@ -328,7 +340,14 @@ fn aim_and_pose(
         armament.corrected_aim = aim;
         let equipped = armament.equipped();
         let weapon = equipped.map(|weapon| AimedWeapon { weapon, aim, face_right });
-        posed.0 = model.pose_character(&avatar.animator.pose(), avatar.position(), face_right, weapon);
+        // The weapon's firing animation runs once from the shot, then the pivot's transforms are
+        // back at rest; switching weapons ends it.
+        if let Some((w, t)) = armament.action {
+            let t = t + clock.stepper.frame().delta;
+            armament.action = art.action(w).filter(|clip| Some(w) == equipped && t <= clip.length).map(|_| (w, t));
+        }
+        let action = armament.action.and_then(|(w, t)| art.action(w).map(|clip| (clip, t)));
+        posed.0 = model.pose_character_acting(&avatar.animator.pose(), avatar.position(), face_right, weapon, action);
         // `CharacterControl2D.z` (an emerging enemy waits behind the scenery at 0).
         if let Some(z) = draw_z {
             posed.0.placement.position.z = z.0;
@@ -390,6 +409,7 @@ fn fire_weapons(
         // A melee weapon: the launcher spawns its effect at the launch point.
         if let (Some(spec), Some(launch_point)) = (melee.0.get(armament.projectile(equipped)), weapon.launch_point) {
             let Some(_launch) = armament.launchers[equipped].update(controls.fire, clock.time, delta) else { continue };
+            armament.action = Some((equipped, 0.0));
             let muzzle = posed.world_position(launch_point);
             let damage = match &spec.damage_scaling {
                 Some(scaling) if session.mode == GameMode::Campaign => {
@@ -406,6 +426,7 @@ fn fire_weapons(
         }
         let (Some(spec), Some(launch_point)) = (library.0.get(armament.projectile(equipped)), weapon.launch_point) else { continue };
         let Some(launch) = armament.launchers[equipped].update(controls.fire, clock.time, delta) else { continue };
+        armament.action = Some((equipped, 0.0));
         let muzzle = posed.world_position(launch_point);
         let damage = match &spec.damage_scaling {
             Some(scaling) if session.mode == GameMode::Campaign => difficulty_modified(
@@ -653,12 +674,22 @@ pub(crate) fn step_projectiles(
             }
             // A sword's deflector: the projectile bounces off and changes sides instead of
             // exploding.
+            let mut deflected = false;
             for swing in &swings {
                 if swing.swing.deflect(&mut projectile.shot, &collision.rules) {
+                    deflected = true;
                     if swing.responsible.is_some() {
                         projectile.responsible = swing.responsible;
                     }
                 }
+            }
+            // Meeting the swing's body instead (not its deflector) ends the projectile there: its
+            // pieces drift and fade in mid-air (`TellOwnerToExplodeOnCollision`).
+            if !deflected && projectile.spec.contact != ContactExplosion::Never && swings.iter().any(|s| s.swing.strikes(&projectile.shot, &collision.rules)) {
+                projectile.shot.contact_point = Some(projectile.shot.position);
+                let (data, anchor) = collision_data(&projectile, Anchor::IDENTITY, AnchorRef::Collider(SWING_COLLIDER));
+                explode(&mut projectile, entity, Some(data), Some(anchor), dt, &mut exploded);
+                continue;
             }
             let Some(hit) = projectile.shot.fixed_step(&collision.world, &collision.rules, &targets, dt) else { continue };
             let amount = projectile.shot.damage;
@@ -742,6 +773,66 @@ fn expire_swings(mut commands: Commands, clock: Res<FrameClock>, mut swings: Que
     for (entity, mut swing) in &mut swings {
         if swing.swing.update(delta) {
             commands.entity(entity).try_despawn();
+        }
+    }
+}
+
+/// `AimVisualizer` (the Spear's launcher): while the throw charges, the arc the spear would fly is
+/// drawn as white dashes (alpha 0.576, width 0.18) with shadows on the plane -0.22, from the
+/// launch point along `FireDirection` at the charged speed under the projectile's gravity. Kept
+/// only up to its `MaximumDifficultyLevelComponents` difficulty.
+#[allow(clippy::too_many_arguments)]
+fn queue_aim_arcs(
+    art: Option<Res<ManArt>>,
+    library: Option<Res<ProjectileLibrary>>,
+    collision: Res<Collision>,
+    session: Res<Session>,
+    light: Res<crate::unity_render::SceneLight>,
+    avatars: Query<(&Controls, &Mortal, &Armament, &Posed)>,
+    mut queue: ResMut<crate::unity_render::FrameQueue>,
+) {
+    let (Some(art), Some(library)) = (art, library) else { return };
+    let weapons = &art.model().rig().weapons;
+    for (controls, mortal, armament, posed) in &avatars {
+        if !mortal.avatar_active() {
+            continue;
+        }
+        let Some(equipped) = armament.equipped() else { continue };
+        let weapon = &weapons[equipped];
+        let (Some(cap), Some(launch_point)) = (weapon.aim_visualizer, weapon.launch_point) else { continue };
+        if session.difficulty > cap {
+            continue;
+        }
+        let charge = armament.charge_time();
+        if charge == 0.0 {
+            continue;
+        }
+        let Some(spec) = library.0.get(armament.projectile(equipped)) else { continue };
+        let speed = spec.speed * spec.speed_by_charge.as_ref().map_or(1.0, |s| s.multiplier(charge));
+        let aim = controls.0.aim;
+        let length = aim.magnitude();
+        if length == 0.0 {
+            continue;
+        }
+        let start_velocity = aim * (speed / length);
+        let gravity = collision.rules.gravity * spec.gravity_scale;
+        let origin = posed.world_position(launch_point);
+        let o = SimVec2::new(origin.x, origin.y);
+        let dashes = sticks_sim::weapons::aim_arc(o, start_velocity, gravity, |a, b| collision.world.linecast(a, b, 1, collision.rules.raycasts_hit_triggers));
+        let color = [255u8, 255, 255, (0.576f32 * 255.0) as u8];
+        let lines: Vec<sticks_sim::visual::StickLine> = dashes
+            .iter()
+            .map(|(a, b)| sticks_sim::visual::StickLine {
+                a: SimVec3::new(o.x + a.x, o.y + a.y, origin.z),
+                b: SimVec3::new(o.x + b.x, o.y + b.y, origin.z),
+                width: 0.18,
+                color,
+                shadow_plane_z: -0.22,
+            })
+            .collect();
+        let g = crate::helicopter::lines_geometry(&lines, origin, light.for_shadows, art.art.line_uvs());
+        if !g.is_empty() {
+            queue.0.push_frame(art.texture, g);
         }
     }
 }

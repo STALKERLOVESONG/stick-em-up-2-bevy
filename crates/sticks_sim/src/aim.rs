@@ -87,6 +87,13 @@ impl CharacterRigModel {
     /// [`Self::solve`] plus the aiming pass. `facing` is the world rotation of the character
     /// object (the pose lives in its local space); the result is again in that local space.
     pub fn solve_aimed(&self, pose: &HumanPose, facing: Quat, aimed: &AimedWeapon) -> RigPose {
+        self.solve_aimed_acting(pose, facing, aimed, None)
+    }
+
+    /// [`Self::solve_aimed`] with the weapon's firing animation at `time` seconds (`action`):
+    /// after the aim turns the weapon, the clip moves and turns the transforms below the weapon
+    /// pivot (the right hand's grip, the sword's blade), and the hands then reach for the grips.
+    pub fn solve_aimed_acting(&self, pose: &HumanPose, facing: Quat, aimed: &AimedWeapon, action: Option<(&unity_data::anim::TransformClip, f32)>) -> RigPose {
         let mut solved = self.solve(pose);
         let rig = self.rig();
         let Some(weapon) = rig.weapons.get(aimed.weapon) else { return solved };
@@ -96,6 +103,9 @@ impl CharacterRigModel {
         // `weaponPivot.LookAt(pivot + aim, up)`: the weapon bone's world rotation is replaced.
         let (weapon_position, old_rotation) = solved.world[weapon.bone];
         rotate_subtree(self, &mut solved, weapon.bone, weapon_position, new_rotation * old_rotation.conjugate());
+        if let Some((clip, time)) = action {
+            self.apply_transform_clip(&mut solved, weapon.bone, clip, time);
+        }
 
         // `OnAnimatorIK`: look at `correctedAim + weaponPivot.position`, hands onto the grips.
         let target = weapon_position + to_local * Vec3::new(aimed.aim.x, aimed.aim.y, 0.0);
@@ -111,6 +121,47 @@ impl CharacterRigModel {
             self.reach_with_arm(&mut solved, upper, lower, hand, goal);
         }
         solved
+    }
+
+    /// Set the local transforms a [`unity_data::anim::TransformClip`] animates below `root` (the
+    /// animated object) to their values at `time`, carrying each one's subtree along.
+    fn apply_transform_clip(&self, solved: &mut RigPose, root: usize, clip: &unity_data::anim::TransformClip, time: f32) {
+        let bones = &self.rig().bones;
+        let base = &bones[root].path;
+        let find = |path: &str| {
+            let full = if base.is_empty() { path.to_owned() } else { format!("{base}/{path}") };
+            bones.iter().position(|b| b.path == full)
+        };
+        let mut overrides: Vec<(usize, Option<Vec3>, Option<Quat>)> = Vec::new();
+        for (path, [x, y, z]) in &clip.positions {
+            let Some(bone) = find(path) else { continue };
+            let p = Vec3::new(x.evaluate(time), y.evaluate(time), z.evaluate(time));
+            match overrides.iter_mut().find(|o| o.0 == bone) {
+                Some(o) => o.1 = Some(p),
+                None => overrides.push((bone, Some(p), None)),
+            }
+        }
+        for (path, [x, y, z, w]) in &clip.rotations {
+            let Some(bone) = find(path) else { continue };
+            let q = Quat::new(x.evaluate(time), y.evaluate(time), z.evaluate(time), w.evaluate(time)).normalized();
+            match overrides.iter_mut().find(|o| o.0 == bone) {
+                Some(o) => o.2 = Some(q),
+                None => overrides.push((bone, None, Some(q))),
+            }
+        }
+        // Parents precede children in the rig's order.
+        overrides.sort_by_key(|o| o.0);
+        for (bone, local_position, local_rotation) in overrides {
+            let Some(parent) = bones[bone].parent else { continue };
+            let (parent_position, parent_rotation) = solved.world[parent];
+            let (old_position, old_rotation) = solved.world[bone];
+            let new_position = local_position.map_or(old_position, |p| parent_position + parent_rotation * p);
+            let new_rotation = local_rotation.map_or(old_rotation, |q| parent_rotation * q);
+            let turn = new_rotation * old_rotation.conjugate();
+            // The bone itself, then everything below it moves rigidly with it.
+            translate_subtree(self, solved, bone, new_position - old_position);
+            rotate_subtree(self, solved, bone, new_position, turn);
+        }
     }
 
     fn look_at_with_head(&self, solved: &mut RigPose, target: Vec3) {
@@ -189,12 +240,18 @@ impl CharacterRigModel {
     /// with the equipped weapon aimed (`weapon` is `None` when nothing is equipped). The model is
     /// turned ±90° about Y so that its local +z is the facing direction.
     pub fn pose_character(&self, pose: &HumanPose, position: Vec2, face_right: bool, weapon: Option<AimedWeapon>) -> PosedCharacter {
+        self.pose_character_acting(pose, position, face_right, weapon, None)
+    }
+
+    /// [`Self::pose_character`] with the equipped weapon's firing animation (see
+    /// [`Self::solve_aimed_acting`]).
+    pub fn pose_character_acting(&self, pose: &HumanPose, position: Vec2, face_right: bool, weapon: Option<AimedWeapon>, action: Option<(&unity_data::anim::TransformClip, f32)>) -> PosedCharacter {
         let placement = BodyPlacement {
             position: Vec3::new(position.x, position.y, DEFAULT_Z),
             rotation: Quat::euler_y_degrees(if face_right { 90.0 } else { -90.0 }),
         };
         let solved = match weapon {
-            Some(aimed) => self.solve_aimed(pose, placement.rotation, &aimed),
+            Some(aimed) => self.solve_aimed_acting(pose, placement.rotation, &aimed, action),
             None => self.solve(pose),
         };
         PosedCharacter { solved, placement }
@@ -270,6 +327,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_sword_swings_and_comes_back() {
+        let Some((model, assets)) = model() else { return };
+        let sword = model.rig().weapons.iter().position(|w| w.name == "Sword").unwrap();
+        let clip = unity_data::anim::load_weapon_action(&assets, "Sword").expect("Sword Swing.anim");
+        assert!((clip.length - 0.2).abs() < 1e-5);
+        let pose = pose_of(&assets, "Idle", 0.0);
+        let aimed = AimedWeapon { weapon: sword, aim: Vec2::new(1.0, 0.0), face_right: true };
+        let plain = model.solve_aimed(&pose, facing(), &aimed);
+        let right_grip = model.rig().weapons[sword].right_hand.unwrap();
+        let blade = model.rig().bones.iter().position(|b| b.path.ends_with("Sword/Right Hand/Flattener/Sword")).unwrap();
+        // At the start and the end the clip holds the rest transforms.
+        for t in [0.0, 0.2] {
+            let acting = model.solve_aimed_acting(&pose, facing(), &aimed, Some((&clip, t)));
+            assert!((acting.position(right_grip) - plain.position(right_grip)).magnitude() < 1e-4, "t {t}");
+            assert!((acting.rotation(blade).w - plain.rotation(blade).w).abs() < 1e-3 || (acting.rotation(blade).w + plain.rotation(blade).w).abs() < 1e-3, "t {t}");
+        }
+        // Mid-swing the grip is thrust forward and the blade has turned.
+        let mid = model.solve_aimed_acting(&pose, facing(), &aimed, Some((&clip, 0.1)));
+        let moved = (mid.position(right_grip) - plain.position(right_grip)).magnitude();
+        assert!((moved - 0.53).abs() < 0.02, "the grip moves 0.68 - 0.15 along the pivot's x: {moved}");
+        let dot = |a: Quat, b: Quat| (a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w).abs();
+        assert!(dot(mid.rotation(blade), plain.rotation(blade)) < 0.9, "the blade turns");
+        // The right hand follows its grip.
+        let right_hand = model.bone_of(bone::RIGHT_HAND).unwrap();
+        assert!((mid.position(right_hand) - mid.position(right_grip)).magnitude() < 0.05);
     }
 
     #[test]

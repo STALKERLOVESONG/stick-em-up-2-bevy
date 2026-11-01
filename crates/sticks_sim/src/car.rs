@@ -136,6 +136,60 @@ impl CarDrive {
     }
 }
 
+/// `RocketControl` (Moon's lunar module): the pilot's throttle (`Clamp01(DesiredSpeed)`) pushes
+/// the body along its up axis from the engine, and its rotation input steers the angular
+/// velocity towards `-ClockwiseRotation × maxAngularVelocity`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RocketDrive {
+    pub tuning: unity_data::vehicles::RocketTuning,
+    /// `desiredSpeedControl` / `desiredClockwiseRotationControl`.
+    desired_speed: f32,
+    clockwise: f32,
+}
+
+impl RocketDrive {
+    /// `engineSound.volume = desiredSpeedControl` (the throttle).
+    pub fn engine_volume(&self) -> f32 {
+        self.desired_speed
+    }
+
+    pub fn new(tuning: unity_data::vehicles::RocketTuning) -> RocketDrive {
+        RocketDrive { tuning, desired_speed: 0.0, clockwise: 0.0 }
+    }
+
+    /// `ClearController` / `OnRespawned`.
+    pub fn clear(&mut self) {
+        self.desired_speed = 0.0;
+        self.clockwise = 0.0;
+    }
+
+    /// The throttle (`engineSound.volume`, and × `engineParticleRate` the exhaust's rate).
+    pub fn throttle(&self) -> f32 {
+        self.desired_speed
+    }
+
+    /// `RocketControl.FixedUpdate`, before the physics step. `engine` is the engine's position in
+    /// the body's frame; `input` the pilot's `(DesiredSpeed, ClockwiseRotation)` while flown.
+    pub fn fixed_update(&mut self, body: &mut crate::rigid_body::RigidBody, engine: Vec2, input: Option<(f32, f32)>, dt: f32) {
+        if let Some((speed, rotation)) = input {
+            self.desired_speed = mathf::clamp01(speed);
+            self.clockwise = rotation;
+        }
+        let t = self.tuning;
+        // `AddForceAtPosition(TransformDirection(0, mass × acceleration), engine.position)`.
+        let thrust = body.mass * self.desired_speed * t.max_acceleration;
+        let (s, c) = body.angle.sin_cos();
+        let force = Vec2::new(-s * thrust, c * thrust);
+        let at = body.position + Vec2::new(c * engine.x - s * engine.y, s * engine.x + c * engine.y);
+        let r = at - body.world_center();
+        body.force = body.force + force;
+        body.torque += r.x * force.y - r.y * force.x;
+        let target = -self.clockwise * t.max_angular_velocity;
+        let w = mathf::move_towards(body.angular_velocity_degrees(), target, t.max_angular_acceleration * dt);
+        body.set_angular_velocity_degrees(w);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +236,24 @@ mod tests {
         // Desired speed 0.4 × 50 = 20 units per second along the car.
         assert!((v - 20.0).abs() < 3.0, "speed {v}");
         assert!(bodies[0].body.angle.abs() < 0.3, "tilted {}", bodies[0].body.angle);
+    }
+
+    #[test]
+    fn full_throttle_lifts_the_module_and_the_stick_turns_it() {
+        let tuning = unity_data::vehicles::RocketTuning { engine: None, max_acceleration: 20.0, max_angular_velocity: 60.0, max_angular_acceleration: 135.0, engine_particle_rate: 500.0 };
+        let mut drive = RocketDrive::new(tuning);
+        let mut body = RigidBody::new(Vec2::ZERO, 0.0, 10.0, 0.0, 0.05, 1.0);
+        drive.fixed_update(&mut body, Vec2::new(0.0, -2.86), Some((1.5, 0.0)), 0.02);
+        // Clamped to full throttle: 10 kg × 20 m/s² straight up, through the centre of mass.
+        assert_eq!(drive.throttle(), 1.0);
+        assert!((body.force.y - 200.0).abs() < 1e-3 && body.force.x.abs() < 1e-4 && body.torque.abs() < 1e-3);
+        // Clockwise input: the angular velocity heads for -60°/s at 135°/s².
+        body.force = Vec2::ZERO;
+        drive.fixed_update(&mut body, Vec2::new(0.0, -2.86), Some((0.0, 1.0)), 0.02);
+        assert!((body.angular_velocity_degrees() + 2.7).abs() < 1e-3);
+        for _ in 0..100 {
+            drive.fixed_update(&mut body, Vec2::new(0.0, -2.86), Some((0.0, 1.0)), 0.02);
+        }
+        assert!((body.angular_velocity_degrees() + 60.0).abs() < 1e-3);
     }
 }

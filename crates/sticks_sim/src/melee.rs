@@ -126,6 +126,17 @@ impl Swing {
         self.age >= self.lifetime
     }
 
+    /// A projectile against the swing's other pieces (the blade's body, without
+    /// `DontExplodeOnCollisionWithMe`): `TellOwnerToExplodeOnCollision` ends it there, and its
+    /// pieces drift in the air where the sword met it. True when its circle touches one.
+    pub fn strikes(&self, shot: &Shot, rules: &PhysicsRules) -> bool {
+        if !rules.layers_collide(self.layer, shot.layer) {
+            return false;
+        }
+        let (center, radius) = (shot.collider_center(), shot.radius());
+        self.pieces.iter().filter(|p| !p.deflector).flat_map(|p| p.convex.iter()).any(|convex| circle_convex_normal(center, radius, &self.world(convex)).is_some())
+    }
+
     /// A projectile against the deflectors: when its circle touches one while approaching it,
     /// it bounces off and, with `TakeResponsibilityForCollidingDamagers`, becomes an
     /// unstoppable projectile of the swing's team. True when it was deflected.
@@ -249,5 +260,17 @@ mod tests {
         assert!(swing.deflect(&mut shot, &rules));
         assert!(shot.velocity.x > 0.0, "{:?}", shot.velocity);
         assert_eq!(shot.layer, team_projectile_layer(0, true));
+    }
+
+    #[test]
+    fn a_bullet_meeting_the_blade_body_is_stopped() {
+        let rules = rules();
+        let swing = Swing::new(&swish(), 40.0, Vec2::ZERO, Vec2::new(1.0, 0.0), 0);
+        let spec = bullet();
+        // Inside the body piece (x 0.5..1.5), clear of the deflector's front edge.
+        let shot = Shot::launch(&spec, 20.0, Vec2::new(0.9, 0.0), Vec2::new(-1.0, 0.0), 0.0, 1, rules.gravity);
+        assert!(swing.strikes(&shot, &rules));
+        let far = Shot::launch(&spec, 20.0, Vec2::new(5.0, 0.0), Vec2::new(-1.0, 0.0), 0.0, 1, rules.gravity);
+        assert!(!swing.strikes(&far, &rules));
     }
 }

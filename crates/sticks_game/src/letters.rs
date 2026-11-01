@@ -54,6 +54,22 @@ struct LevelLetter {
 /// A text drawn as it is.
 struct StaticText {
     text: LevelText,
+    /// `NextGoalPrompt.Start`: (final alpha, seconds since the level loaded) of a text that is
+    /// invisible for 5 s and then fades in over 5 s.
+    fade_in: Option<(f32, f32)>,
+}
+
+/// `NextGoalPrompt`'s wait before and length of the fade-in.
+const NEXT_GOAL_PROMPT_WAIT: f32 = 5.0;
+const NEXT_GOAL_PROMPT_FADE: f32 = 5.0;
+
+/// `NextGoalPrompt.Start`'s text.
+fn next_goal_prompt(any_player_completed_all: bool, difficulty: i32) -> String {
+    if any_player_completed_all {
+        return "You have completed all achievements! We are truly impressed!".to_owned();
+    }
+    let prompt = "Check out the achievements for more challenges!";
+    if difficulty >= 1 { format!("You are officially a Stick 'Em Up 2 Expert!\n{prompt}") } else { prompt.to_owned() }
 }
 
 #[derive(Resource)]
@@ -96,17 +112,23 @@ fn spawn_level_texts(
     mut textures: ResMut<UnityTextures>,
     mut materials: ResMut<Assets<UnityLitMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    memory: Res<crate::lobby::LobbyMemory>,
+    session: Res<crate::state::Session>,
 ) {
     let assets_dir = config.assets_dir();
     let mut load = TextureLoad::new(&assets_dir, &asset_server, &mut images, &mut materials);
     let mut fonts = FontLibrary::new(&assets_dir);
+    // `NextGoalPrompt.Start`: has any locally active player done every goal?
+    let total_goals = sticks_sim::goals::GOALS.len();
+    let any_completed_all = (0..4)
+        .filter(|&i| memory.is_player_active(i))
+        .any(|i| memory.goals.done_count(&crate::lobby::LobbyMemory::player_id(i), memory.campaign_level_count()) == total_goals);
     let mut font_textures = HashMap::new();
     let mut letters = Vec::new();
     let mut texts = Vec::new();
     for text in &level.0.texts {
-        // Layer 5 ("UI") texts are only seen by the UI camera.
-        // TODO: draw the level's own UI-layer texts (Office's "Enemies Remaining UI", Moon
-        // Race's "Timing UI") with the HUD.
+        // Layer 5 ("UI") texts are only seen by the UI camera: the HUD grafts the level's UI
+        // objects ("Enemies Remaining UI", "Timing UI") and draws them.
         if text.layer == 5 {
             continue;
         }
@@ -118,7 +140,14 @@ fn spawn_level_texts(
             }
         }
         if !text.explodable {
-            texts.push(StaticText { text: text.clone() });
+            let mut text = text.clone();
+            let fade_in = text.next_goal_prompt.then(|| {
+                text.text.text = next_goal_prompt(any_completed_all, session.difficulty);
+                let alpha = text.text.color[3];
+                text.text.color[3] = 0.0;
+                (alpha, 0.0)
+            });
+            texts.push(StaticText { text, fade_in });
             continue;
         }
         let Some(font) = fonts.get(&text.text.font) else {
@@ -223,10 +252,18 @@ fn text_with_shadow(
     out
 }
 
-fn queue_level_texts(mut texts: ResMut<LevelTexts>, light: Res<SceneLight>, mut queue: ResMut<FrameQueue>) {
+fn queue_level_texts(mut texts: ResMut<LevelTexts>, light: Res<SceneLight>, time: Res<Time>, mut queue: ResMut<FrameQueue>) {
     let texts = &mut *texts;
     let light = light.for_shadows;
     let mut renderers = Vec::new();
+    // `NextGoalPrompt`'s coroutine on `Time.timeSinceLevelLoad` (the text shadow copies the alpha).
+    for t in &mut texts.texts {
+        if let Some((alpha, since_load)) = t.fade_in.as_mut() {
+            *since_load += time.delta_secs();
+            let progress = ((*since_load - NEXT_GOAL_PROMPT_WAIT) / NEXT_GOAL_PROMPT_FADE).clamp(0.0, 1.0);
+            t.text.text.color[3] = progress * *alpha;
+        }
+    }
     for i in 0..texts.texts.len() {
         let t = texts.texts[i].text.clone();
         let p = t.text.world.t;

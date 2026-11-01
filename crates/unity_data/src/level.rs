@@ -108,6 +108,8 @@ impl Default for PositionerSettings {
 #[derive(Clone, Debug)]
 pub struct CameraSetup {
     pub position: [f32; 3],
+    /// World x/y of the camera's parent ("Camera Offset"; zero at the scene root).
+    pub parent_offset: [f32; 2],
     /// Vertical field of view in degrees.
     pub field_of_view: f32,
     pub near: f32,
@@ -165,12 +167,23 @@ pub struct Level {
     pub time_limit: Option<(FileId, f32)>,
     /// `Wave`s (Pirates).
     pub waves: Vec<crate::scenery::WaveSpec>,
+    /// `Whale`s (Pirates).
+    pub whales: Vec<crate::scenery::WhaleSpec>,
+    /// `StarShower`s (Moon).
+    pub star_showers: Vec<crate::scenery::StarShowerSpec>,
+    /// `CannonControl` emplacements (Pirates).
+    pub cannons: Vec<crate::vehicles::CannonSpawn>,
     /// Active, enabled `MinimumCameraDistanceChanger`s: world x and `distance`, sorted by x.
     pub distance_changers: Vec<(f32, f32)>,
+    /// Active, enabled `CameraOffsetXChanger`s (Pirates): world x and `offsetX`, sorted by x.
+    pub offset_changers: Vec<(f32, f32)>,
     /// `CarControl` vehicles.
     pub cars: Vec<crate::vehicles::CarSpawn>,
     /// `GravityChanger.gravity` (the Moon levels): `Physics2D.gravity` while the level is loaded.
     pub gravity: Option<[f32; 2]>,
+    /// An active `HidePlayerInfo` (the "Complete" ending scene): the HUD's `Player Info` is off
+    /// while the level is loaded.
+    pub hides_player_info: bool,
 }
 
 /// What `AllClientControlTypes` reports offline with the keyboard and mouse as the only input
@@ -188,6 +201,8 @@ pub struct LevelText {
     pub layer: u8,
     pub shadower: Option<(Option<String>, f32)>,
     pub explodable: bool,
+    /// `NextGoalPrompt`: the text is replaced by the achievements prompt and fades in.
+    pub next_goal_prompt: bool,
 }
 
 /// The texts that are active once `ControlTypeDependentActivator.ReceiveControlTypes` has run:
@@ -231,7 +246,7 @@ pub fn level_texts(scene: &Scene, scripts: &ScriptIndex, control_types: &str) ->
             Some((caster, font, plane)) if *caster == index => Some((font.clone(), *plane)),
             _ => None,
         });
-        out.push(LevelText { text: text.clone(), layer: go.layer(), shadower, explodable: has(&go, "ExplodableText") });
+        out.push(LevelText { text: text.clone(), layer: go.layer(), shadower, explodable: has(&go, "ExplodableText"), next_goal_prompt: has(&go, "NextGoalPrompt") });
     }
     out
 }
@@ -334,6 +349,10 @@ pub struct EnemySpawn {
     /// `CharacterColorSetter.bodyColor` (`Color32`) and `helmetColor` (`Color`).
     pub body_color: Option<[u8; 4]>,
     pub helmet_color: Option<[f32; 4]>,
+    /// `ConstantExplosion.timeBetweenExplosions` on the enemy's root (Corruption 2's "Big Bad").
+    pub constant_explosion: Option<f32>,
+    /// `ColorCycler.period` (Corruption 2's "Big Bad"): the body colour runs round the hue circle.
+    pub color_cycle: Option<f32>,
 }
 
 /// `Emerge`: the enemy waits behind the scenery (z 0, layer 25, its firing subsumed) until a
@@ -408,6 +427,10 @@ pub(crate) fn enemy_of(scene: &Scene, controller: &GameObject<'_>, scripts: &Scr
         deactivate_off_screen: None,
         body_color: None,
         helmet_color: None,
+        constant_explosion: mono_fields(&root, scripts, "ConstantExplosion")
+            .filter(|b| b.bool_of("m_Enabled").unwrap_or(true))
+            .map(|b| b.f32_of("timeBetweenExplosions").unwrap_or(1.0 / 15.0)),
+        color_cycle: mono_fields(&root, scripts, "ColorCycler").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).map(|b| b.f32_of("period").unwrap_or(10.0)),
     };
     for component in controller.components() {
         if component.class_id != class::MONO_BEHAVIOUR {
@@ -702,6 +725,10 @@ pub fn extract_level_with(name: &str, scene: &Scene, scripts: &ScriptIndex, cont
         });
         Some(CameraSetup {
             position: go.world_affine().t,
+            parent_offset: go.parent().map_or([0.0, 0.0], |p| {
+                let t = p.world_affine().t;
+                [t[0], t[1]]
+            }),
             field_of_view: cam.body.f32_of("field of view").unwrap_or(60.0),
             near: cam.body.f32_of("near clip plane").unwrap_or(0.3),
             far: cam.body.f32_of("far clip plane").unwrap_or(1000.0),
@@ -812,12 +839,24 @@ pub fn extract_level_with(name: &str, scene: &Scene, scripts: &ScriptIndex, cont
         tips,
         versus_ender: versus_ender(scene, scripts),
         waves: crate::scenery::waves(scene, scripts),
+        whales: crate::scenery::whales(scene, scripts),
+        star_showers: crate::scenery::star_showers(scene, scripts),
+        cannons: crate::vehicles::cannons(scene, scripts),
         cars: crate::vehicles::cars(scene, scripts),
         distance_changers: {
             let mut changers: Vec<(f32, f32)> = objects
                 .iter()
                 .filter(|go| go.active_in_hierarchy())
                 .filter_map(|go| mono_fields(go, scripts, "MinimumCameraDistanceChanger").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).map(|b| (go.world_affine().t[0], b.f32_of("distance").unwrap_or(0.0))))
+                .collect();
+            changers.sort_by(|a, b| a.0.total_cmp(&b.0));
+            changers
+        },
+        offset_changers: {
+            let mut changers: Vec<(f32, f32)> = objects
+                .iter()
+                .filter(|go| go.active_in_hierarchy())
+                .filter_map(|go| mono_fields(go, scripts, "CameraOffsetXChanger").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).map(|b| (go.world_affine().t[0], b.f32_of("offsetX").unwrap_or(0.0))))
                 .collect();
             changers.sort_by(|a, b| a.0.total_cmp(&b.0));
             changers
@@ -830,6 +869,7 @@ pub fn extract_level_with(name: &str, scene: &Scene, scripts: &ScriptIndex, cont
             .iter()
             .filter(|go| go.active_in_hierarchy())
             .find_map(|go| mono_fields(go, scripts, "GravityChanger").filter(|b| b.bool_of("m_Enabled").unwrap_or(true)).and_then(|b| b.get("gravity")?.as_vec2()).map(|(x, y)| [x, y])),
+        hides_player_info: objects.iter().filter(|go| go.active_in_hierarchy()).any(|go| mono_fields(go, scripts, "HidePlayerInfo").is_some_and(|b| b.bool_of("m_Enabled").unwrap_or(true))),
     }
 }
 
@@ -1097,9 +1137,42 @@ pub fn load_level_with(export_root: &Path, scene_path: &str, conditions: Option<
     let mut scene = Scene::load(&export_root.join(scene_path))?;
     if let Some(conditions) = conditions {
         apply_awake_gates(&mut scene, &scripts, conditions);
+        // `Utility.Shuffle` uses `new System.Random()` (seeded from the clock): every load differs.
+        let mut seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.subsec_nanos() as u64 ^ d.as_secs()) | 1;
+        randomize_child_positions(&mut scene, &scripts, |n| {
+            // xorshift64*
+            seed ^= seed >> 12;
+            seed ^= seed << 25;
+            seed ^= seed >> 27;
+            (seed.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % n.max(1)
+        });
     }
     let name = Path::new(scene_path).file_stem().and_then(|s| s.to_str()).unwrap_or("level");
     Ok(extract_level_with(name, &scene, &scripts, control_types))
+}
+
+/// `RandomizeChildPositions.Awake` (Corruption 2's apartment blocks): the children of each
+/// active one swap local positions in a random order (`pick(n)` returns `0..n`).
+pub fn randomize_child_positions(scene: &mut Scene, scripts: &ScriptIndex, mut pick: impl FnMut(usize) -> usize) {
+    let mut groups: Vec<Vec<(FileId, Value)>> = Vec::new();
+    for go in scene.game_objects() {
+        if !go.active_in_hierarchy() || mono_fields(&go, scripts, "RandomizeChildPositions").is_none_or(|b| !b.bool_of("m_Enabled").unwrap_or(true)) {
+            continue;
+        }
+        let children = go.children();
+        groups.push(children.iter().map(|c| (c.id(), c.transform().and_then(|t| t.body.get("m_LocalPosition")).cloned().unwrap_or_default())).collect());
+    }
+    for group in groups {
+        let mut positions: Vec<Value> = group.iter().map(|(_, p)| p.clone()).collect();
+        // Fisher–Yates (the shuffle's order differs from .NET's, as its seed does anyway).
+        for i in (1..positions.len()).rev() {
+            let j = pick(i + 1);
+            positions.swap(i, j);
+        }
+        for ((child, _), position) in group.into_iter().zip(positions) {
+            scene.set_local_position(child, position);
+        }
+    }
 }
 
 /// The `Awake` of every active object's level-set-up gates:

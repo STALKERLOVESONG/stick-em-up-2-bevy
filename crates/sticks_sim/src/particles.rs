@@ -101,6 +101,12 @@ impl ParticleSystem {
 
     /// One simulation step of `delta` seconds with the transform at `emitter` (world).
     pub fn update(&mut self, spec: &ParticleSystemSpec, delta: f32, emitter: Vec3, gravity: Vec2, rng: &mut GameRng) {
+        self.update_oriented(spec, delta, emitter, unity_compat::Quat::IDENTITY, gravity, rng);
+    }
+
+    /// [`Self::update`] for a transform turned by `rotation`: new particles leave along the
+    /// shape's directions turned with it (world-space simulation).
+    pub fn update_oriented(&mut self, spec: &ParticleSystemSpec, delta: f32, emitter: Vec3, rotation: unity_compat::Quat, gravity: Vec2, rng: &mut GameRng) {
         let dt = delta * spec.simulation_speed;
         let fall = Vec3::new(gravity.x, gravity.y, 0.0) * (spec.gravity_modifier * dt);
         self.particles.retain_mut(|p| {
@@ -166,7 +172,8 @@ impl ParticleSystem {
             let fraction = if dt > 0.0 { offset / dt } else { 1.0 };
             let origin = if spec.local_space { Vec3::ZERO } else { Vec3::lerp(from, emitter, fraction) };
             let mut p = spawn(spec, norm, rng);
-            p.position = origin + p.position;
+            p.position = origin + rotation * p.position;
+            p.velocity = rotation * p.velocity;
             if age > 0.0 {
                 p.velocity = p.velocity + Vec3::new(gravity.x, gravity.y, 0.0) * (spec.gravity_modifier * age);
                 p.position = p.position + p.velocity * age;
@@ -282,6 +289,18 @@ fn spawn(spec: &ParticleSystemSpec, norm: f32, rng: &mut GameRng) -> Particle {
                 }
                 let r = if matches!(shape.kind, ShapeKind::Sphere | ShapeKind::Hemisphere) { shape.radius * rng.value().cbrt() } else { shape.radius };
                 (dir * r, dir)
+            }
+            ShapeKind::Cone => {
+                // A point on the base disc; the direction leans out with the distance from the
+                // centre, by `angle` at the rim (along local +z at the centre).
+                // TODO(UNCERTAIN): Unity's exact cone distribution (it also emits from the base
+                // only, as here, with "Base" emission).
+                let a = rng.value() * shape.arc.max(0.0).min(360.0).to_radians().max(1e-6);
+                let d = rng.value().sqrt();
+                let (sin, cos) = shape.angle.clamp(0.0, 90.0).to_radians().sin_cos();
+                let radial = Vec3::new(a.cos(), a.sin(), 0.0);
+                let dir = Vec3::new(radial.x * d * sin, radial.y * d * sin, cos + (1.0 - d) * (1.0 - cos)).normalized();
+                (radial * (shape.radius * d), dir)
             }
             _ => (Vec3::ZERO, Vec3::FORWARD),
         }

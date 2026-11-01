@@ -216,6 +216,12 @@ fn spawn_enemies(
             Transform::from_xyz(position.x, position.y, -DEFAULT_Z),
         ));
         entity.insert(crate::level_end::SceneObject(spawn.object));
+        if let Some(interval) = spawn.constant_explosion {
+            entity.insert(crate::figure::ConstantExplosion::new(interval));
+        }
+        if let Some(period) = spawn.color_cycle {
+            entity.insert(crate::figure::ColorCycler::new(period));
+        }
         if let Some((emergence, trigger)) = emergence {
             entity.insert((Emerging { emergence, trigger, original_layer }, DrawZ(EMERGE_HIDDEN_Z)));
         }

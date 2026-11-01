@@ -958,3 +958,46 @@ mod tests {
         assert!((hit.helmet[0] - 0.7).abs() < 1e-6 && (hit.helmet[1] - 1.1).abs() < 1e-6 && (hit.helmet[3] - 2.0).abs() < 1e-6);
     }
 }
+
+/// `ColorCycler.Update`: the body colour at `time_since_level_load` — full saturation round the
+/// hue circle once per `period`, at value 1 (0.5 while `hit`) — and the matching helmet colour
+/// (`CharacterColors.MatchingHelmetColorForBodyColor`: the body × 0.8980392).
+pub fn color_cycler_colors(time_since_level_load: f32, period: f32, hit: bool) -> ([f32; 4], [f32; 4]) {
+    let hue = time_since_level_load % period / period * 360.0;
+    let value = if hit { 0.5 } else { 1.0 };
+    let chroma = value;
+    let h = hue / 60.0;
+    let x = chroma * (1.0 - ((h % 2.0) - 1.0).abs());
+    let (r, g, b) = if (0.0..1.0).contains(&h) {
+        (chroma, x, 0.0)
+    } else if h < 2.0 {
+        (x, chroma, 0.0)
+    } else if h < 3.0 {
+        (0.0, chroma, x)
+    } else if h < 4.0 {
+        (0.0, x, chroma)
+    } else if h < 5.0 {
+        (x, 0.0, chroma)
+    } else {
+        (chroma, 0.0, x)
+    };
+    let m = value - chroma;
+    let body = [r + m, g + m, b + m, 1.0];
+    const HELMET: f32 = 0.898_039_2;
+    (body, [body[0] * HELMET, body[1] * HELMET, body[2] * HELMET, body[3]])
+}
+
+#[cfg(test)]
+mod color_cycler_tests {
+    use super::color_cycler_colors;
+
+    #[test]
+    fn the_hue_runs_red_green_blue_and_darkens_on_a_hit() {
+        assert_eq!(color_cycler_colors(0.0, 10.0, false).0, [1.0, 0.0, 0.0, 1.0]);
+        let (g, _) = color_cycler_colors(10.0 / 3.0, 10.0, false);
+        assert!((g[1] - 1.0).abs() < 1e-5 && g[0] < 1e-4 && g[2] < 1e-4, "{g:?}");
+        let (b, helmet) = color_cycler_colors(20.0 / 3.0, 10.0, true);
+        assert!((b[2] - 0.5).abs() < 1e-5, "{b:?}");
+        assert!((helmet[2] - 0.5 * 0.898_039_2).abs() < 1e-5);
+    }
+}

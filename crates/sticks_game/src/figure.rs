@@ -43,6 +43,8 @@ pub struct ManArt {
     palette: CharacterPalette,
     /// Queue texture of the atlas the `Line` sprite lives in.
     pub(crate) texture: u32,
+    /// Each rig weapon's firing animation (`firingAnimator`), when it has one.
+    actions: Vec<Option<Arc<unity_data::anim::TransformClip>>>,
 }
 
 impl ManArt {
@@ -60,15 +62,46 @@ impl ManArt {
     pub fn model(&self) -> &CharacterRigModel {
         &self.model
     }
+
+    /// The firing animation of rig weapon `weapon` (the Sword's swing, the throws).
+    pub fn action(&self, weapon: usize) -> Option<&unity_data::anim::TransformClip> {
+        self.actions.get(weapon).and_then(|a| a.as_deref())
+    }
 }
 
 impl ManArt {
+    /// A `VehicleOccupant` posed in its animation state at the seat (`rotation` is the seat's
+    /// world rotation), optionally holding `weapon` aimed (`CarGunnerControl`'s
+    /// `SetUpNewWeapon` + `CorrectAndSetAim` + `VehicleOccupantIK`).
+    pub(crate) fn occupant_posed(
+        &self,
+        animation: &Arc<sticks_sim::animator::AnimatorModel>,
+        state: &str,
+        position: unity_compat::Vec3,
+        rotation: unity_compat::Quat,
+        weapon: Option<&sticks_sim::aim::AimedWeapon>,
+    ) -> Option<sticks_sim::aim::PosedCharacter> {
+        let state = animation.state_index(state)?;
+        let mut animator = sticks_sim::animator::Animator::new(animation.clone());
+        animator.play(state);
+        let pose = animator.pose();
+        let solved = match weapon {
+            Some(aimed) => self.model.solve_aimed_acting(&pose, rotation, aimed, None),
+            None => self.model.solve(&pose),
+        };
+        // Posed at the usual depth; the renderers are moved to the seat with their shadow planes.
+        let placement = sticks_sim::visual::BodyPlacement { position: unity_compat::Vec3::new(position.x, position.y, sticks_sim::character::DEFAULT_Z), rotation };
+        Some(sticks_sim::aim::PosedCharacter { solved, placement })
+    }
+
     /// What a `VehicleOccupant` draws: its `Man` (the "Vehicle Occupant" prefab, the same rig with
     /// no weapon sprite showing) played into the animator state `state` ("Driving", "Sitting"),
     /// at the seat's world position and rotation, in the controlling player's colours.
     ///
     /// TODO(UNCERTAIN): the occupant prefab keeps all three weapon pivots active with their
     /// sprites off; it is drawn here with nothing equipped, so the arms follow the clip alone.
+    /// A gunner's occupant shows only the weapon `CarGunnerControl` set up.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn occupant_renderers(
         &self,
         animation: &Arc<sticks_sim::animator::AnimatorModel>,
@@ -77,15 +110,12 @@ impl ManArt {
         rotation: unity_compat::Quat,
         palette: CharacterPalette,
         light: Option<unity_compat::Vec3>,
+        weapon: Option<&sticks_sim::aim::AimedWeapon>,
     ) -> Vec<(u32, sticks_sim::draw::Geometry)> {
-        let Some(state) = animation.state_index(state) else { return Vec::new() };
-        let mut animator = sticks_sim::animator::Animator::new(animation.clone());
-        animator.play(state);
-        let solved = self.model.solve(&animator.pose());
-        // Posed at the usual depth, then moved to the seat with its shadow planes.
+        let Some(posed) = self.occupant_posed(animation, state, position, rotation, weapon) else { return Vec::new() };
         let default_z = sticks_sim::character::DEFAULT_Z;
-        let placement = sticks_sim::visual::BodyPlacement { position: unity_compat::Vec3::new(position.x, position.y, default_z), rotation };
-        let visual = self.model.visual(&solved, &placement, &palette, light, &|bone| self.model.active_with_weapon(bone, None)).shifted_z(position.z - default_z);
+        let equipped = weapon.map(|w| w.weapon);
+        let visual = self.model.visual(&posed.solved, &posed.placement, &palette, light, &|bone| self.model.active_with_weapon(bone, equipped)).shifted_z(position.z - default_z);
         visual.renderers_textured(&self.art).into_iter().filter(|(_, g)| !g.is_empty()).map(|(t, g)| (t.unwrap_or(self.texture), g)).collect()
     }
 }
@@ -93,6 +123,51 @@ impl ManArt {
 /// `CharacterColor` of an avatar whose colours differ from the prefab's (`CharacterColorSetter`).
 #[derive(Component, Clone, Copy, Deref)]
 pub struct Palette(pub CharacterPalette);
+
+/// `ColorCycler` (Corruption 2's "Big Bad"): its `CharacterColor` runs round the hue circle every
+/// `period` seconds, at half brightness for `FlashCharacterOnDamage.flashTime` after each hit.
+#[derive(Component)]
+pub struct ColorCycler {
+    period: f32,
+    /// One pending end per `Damaged` coroutine; the first to end clears `hit`.
+    remaining: Vec<f32>,
+    hit: bool,
+}
+
+impl ColorCycler {
+    pub fn new(period: f32) -> ColorCycler {
+        ColorCycler { period: period.max(1e-3), remaining: Vec::new(), hit: false }
+    }
+}
+
+/// `ColorCycler.Damaged` coroutines and `Update`, on `Time.timeSinceLevelLoad`.
+fn cycle_colors(clock: Res<FrameClock>, mut notices: MessageReader<LifeNotice>, mut cyclers: Query<(&mut ColorCycler, &mut Palette)>) {
+    let delta = clock.stepper.frame().delta;
+    for (mut cycler, _) in &mut cyclers {
+        if cycler.remaining.is_empty() {
+            continue;
+        }
+        for t in &mut cycler.remaining {
+            *t -= delta;
+        }
+        let before = cycler.remaining.len();
+        cycler.remaining.retain(|t| *t > 0.0);
+        if cycler.remaining.len() != before {
+            cycler.hit = false;
+        }
+    }
+    for notice in notices.read() {
+        if let (LifeEvent::Damaged(_), Ok((mut cycler, _))) = (&notice.event, cyclers.get_mut(notice.avatar)) {
+            cycler.hit = true;
+            cycler.remaining.push(FLASH_SECONDS);
+        }
+    }
+    for (cycler, mut palette) in &mut cyclers {
+        let (body, helmet) = sticks_sim::visual::color_cycler_colors(clock.time, cycler.period, cycler.hit);
+        palette.0.body = body.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+        palette.0.helmet = helmet;
+    }
+}
 
 /// `FlashCharacterOnDamage` state of an avatar: one pending end time per `Damaged` coroutine.
 /// Each finishing coroutine restores the normal colours, even if a later hit started another.
@@ -107,12 +182,12 @@ pub struct FigurePlugin;
 impl Plugin for FigurePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::InGame), load_man_art)
-            .add_systems(Update, (attach_hit_flash, track_hits).chain().in_set(crate::FrameSet::Present).before(QueueSet::Collect))
+            .add_systems(Update, (attach_hit_flash, track_hits, cycle_colors).chain().in_set(crate::FrameSet::Present).before(QueueSet::Collect))
             // `Explosion.Go` happens in the damage callback; its `Update` runs after it in the
             // same frame, next to the life cycle's own explosion clock.
             .add_systems(
                 Update,
-                (start_explosions.before(crate::life::tick_lives), tick_explosions.after(crate::life::tick_lives)).in_set(crate::FrameSet::Characters),
+                (start_explosions.before(crate::life::tick_lives), tick_explosions.after(crate::life::tick_lives), constant_explosions.after(crate::life::tick_lives)).in_set(crate::FrameSet::Characters),
             )
             .add_systems(Update, (queue_figures, queue_projectiles, queue_explosions).in_set(QueueSet::Collect).run_if(in_state(AppState::InGame)));
     }
@@ -145,7 +220,9 @@ pub(crate) fn load_man_art(
     let enemy_prefabs = level.0.enemies.iter().flat_map(|e| &e.launcher_modifiers).filter_map(|m| Some((m.weapon.as_str(), m.projectile.as_deref()?)));
     // Helicopter guns' launchers too.
     let helicopter_prefabs = level.0.helicopters.iter().flat_map(|h| &h.guns).map(|g| ("Helicopter Gun", g.projectile.as_str()));
-    for (weapon, guid) in rig_prefabs.chain(enemy_prefabs).chain(helicopter_prefabs) {
+    // And the cannons' (Pirates).
+    let cannon_prefabs = level.0.cannons.iter().flat_map(|c| &c.launchers).map(|l| ("Cannon", l.projectile.as_str()));
+    for (weapon, guid) in rig_prefabs.chain(enemy_prefabs).chain(helicopter_prefabs).chain(cannon_prefabs) {
         if projectiles.contains_key(guid) {
             continue;
         }
@@ -163,6 +240,22 @@ pub(crate) fn load_man_art(
                 Err(e) => warn!("melee prefab of {weapon}: {e}"),
             },
             Err(e) => warn!("launcher prefab of {weapon}: {e}"),
+        }
+    }
+    // Moon's falling stars (`StarShower.prefab`): bodies without a `Projectile` script, launched
+    // at the length of `launchVelocity` (`crate::scenery`).
+    for shower in &level.0.star_showers {
+        if projectiles.contains_key(&shower.prefab) {
+            continue;
+        }
+        match unity_data::projectile::try_load_projectile_with(&assets, &shower.prefab, false) {
+            Ok(Some(mut star)) => {
+                let [x, y] = shower.launch_velocity;
+                star.speed = (x * x + y * y).sqrt();
+                projectiles.insert(shower.prefab.clone(), Arc::new(star));
+            }
+            Ok(None) => {}
+            Err(e) => warn!("star shower prefab: {e}"),
         }
     }
     art.add_sprites(&library.collection, projectiles.values().flat_map(|spec| spec.sprites.iter().map(|s| s.sprite_name.as_str())));
@@ -192,8 +285,9 @@ pub(crate) fn load_man_art(
     }
     commands.insert_resource(ProjectileLibrary(projectiles));
     commands.insert_resource(crate::weapon::MeleeLibrary(melee));
+    let actions = rig.weapons.iter().map(|w| unity_data::anim::load_weapon_action(&assets, &w.name).map(Arc::new)).collect();
     let model = CharacterRigModel::new(avatar, rig).expect("the humanoid avatar does not fit the Man rig");
-    commands.insert_resource(ManArt { model: Arc::new(model), art, palette, texture });
+    commands.insert_resource(ManArt { model: Arc::new(model), art, palette, texture, actions });
 }
 
 /// The `Man` rig, its humanoid avatar, and the sprite collection its lines and helmet are drawn
@@ -227,7 +321,7 @@ impl ManArt {
         let palette = CharacterPalette::of_rig(&rig);
         let art = VisualArt::new(&library.collection, &rig)?;
         let model = CharacterRigModel::new(avatar, rig)?;
-        Some(ManArt { model: Arc::new(model), art, palette, texture })
+        Some(ManArt { model: Arc::new(model), art, palette, texture, actions: Vec::new() })
     }
 }
 
@@ -354,11 +448,50 @@ fn tick_explosions(mut commands: Commands, clock: Res<FrameClock>, mut explosion
     }
 }
 
-fn queue_explosions(art: Option<Res<ManArt>>, light: Res<SceneLight>, explosions: Query<&Exploding>, mut queue: ResMut<FrameQueue>) {
+fn queue_explosions(art: Option<Res<ManArt>>, light: Res<SceneLight>, explosions: Query<&Exploding>, constant: Query<&ConstantExplosion>, mut queue: ResMut<FrameQueue>) {
     let Some(art) = art else { return };
-    for exploding in &explosions {
-        for (texture, geometry) in exploding.0.renderers_textured(&art.art, light.for_shadows) {
+    let running = explosions.iter().map(|e| &e.0).chain(constant.iter().flat_map(|c| c.running.iter()));
+    for explosion in running {
+        for (texture, geometry) in explosion.renderers_textured(&art.art, light.for_shadows) {
             queue.0.push_frame(texture.unwrap_or(art.texture), geometry);
+        }
+    }
+}
+
+/// `ConstantExplosion` (Corruption 2's "Big Bad"): every `timeBetweenExplosions` the character's
+/// lines and sprites as they are fly apart once more (`Explosion.Go` of a pooled explosion) while
+/// the character itself stays; a pool of `ceil(3 s / interval)` explosions, each back in the pool
+/// when finished, caps how many run at once.
+#[derive(Component)]
+pub struct ConstantExplosion {
+    interval: f32,
+    until_next: f32,
+    capacity: usize,
+    running: Vec<Explosion>,
+}
+
+impl ConstantExplosion {
+    pub fn new(interval: f32) -> ConstantExplosion {
+        let interval = interval.max(1e-3);
+        ConstantExplosion { interval, until_next: interval, capacity: (3.0 / interval).ceil() as usize, running: Vec::new() }
+    }
+}
+
+fn constant_explosions(clock: Res<FrameClock>, mut rng: ResMut<DeathRng>, mut characters: Query<(&Mortal, Option<&LastVisual>, &mut ConstantExplosion)>) {
+    let delta = clock.stepper.frame().delta;
+    for (mortal, last, mut constant) in &mut characters {
+        let constant = &mut *constant;
+        constant.running.retain_mut(|e| !e.update(delta));
+        // `OnEnable` restarts the timer: a deactivated character (dead, asleep) does not run it.
+        if !mortal.avatar_active() {
+            constant.until_next = constant.interval;
+            continue;
+        }
+        let Some(last) = last else { continue };
+        constant.until_next -= delta;
+        if constant.until_next <= 0.0 && constant.running.len() < constant.capacity {
+            constant.until_next += constant.interval;
+            constant.running.push(Explosion::go(&last.visual, last.root, last.root, MAN_EXPLOSION_FADE_WAIT, &mut rng.0, delta));
         }
     }
 }

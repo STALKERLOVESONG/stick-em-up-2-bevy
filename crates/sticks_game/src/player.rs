@@ -44,6 +44,11 @@ impl PlayerDevices {
     pub fn new(devices: Vec<InputDevice>) -> Self {
         Self { devices, character: RoleInputChoice::default(), helicopter: RoleInputChoice::default() }
     }
+
+    /// The device the `CharacterInput`'s current processor reads (the engaged one).
+    pub(crate) fn character_device(&self) -> Option<InputDevice> {
+        self.character.current.and_then(|i| self.devices.get(i).copied())
+    }
 }
 
 /// `CharacterInput.EnterVehicle`: the enter/exit button went down this frame.

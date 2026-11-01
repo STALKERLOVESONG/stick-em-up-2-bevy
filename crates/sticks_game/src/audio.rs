@@ -333,6 +333,7 @@ fn vehicle_engines(
     assets: Res<AssetServer>,
     cameras: Query<&Rig, With<LevelCamera>>,
     helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
+    cars: Query<(Entity, &crate::cars::Car)>,
     mut voices: Query<(Entity, &EngineVoice, Option<&mut AudioSink>)>,
     memory: Res<crate::lobby::LobbyMemory>,
 ) {
@@ -341,7 +342,7 @@ fn vehicle_engines(
     let ear = listener(&cameras);
     let mut sounding = Vec::new();
     for (entity, voice, sink) in &mut voices {
-        let engine = helicopters.get(voice.vehicle).ok().and_then(|(_, h)| h.engine());
+        let engine = helicopters.get(voice.vehicle).ok().and_then(|(_, h)| h.engine()).or_else(|| cars.get(voice.vehicle).ok().and_then(|(_, c)| c.engine()));
         let Some((sound, at, volume, pitch)) = engine else {
             commands.entity(entity).try_despawn();
             continue;
@@ -353,11 +354,13 @@ fn vehicle_engines(
         sink.set_volume(Volume::Linear((volume * mixer * distance * sound_volume).max(0.0)));
         sink.set_speed(pitch);
     }
-    for (vehicle, h) in &helicopters {
+    // `AudioSource.playOnAwake` of every vehicle's engine (helicopters, then cars and rockets).
+    let engines = helicopters.iter().map(|(v, h)| (v, h.spec.name.as_str(), h.engine())).chain(cars.iter().map(|(v, c)| (v, c.spec.name.as_str(), c.engine())));
+    for (vehicle, name, engine) in engines {
         if sounding.contains(&vehicle) {
             continue;
         }
-        let Some((sound, _, _, pitch)) = h.engine() else { continue };
+        let Some((sound, _, _, pitch)) = engine else { continue };
         if !sound.play_on_awake {
             continue;
         }
@@ -365,7 +368,7 @@ fn vehicle_engines(
         let handle = audio.clip(&path, &assets);
         let settings = if sound.looping { PlaybackSettings::LOOP } else { PlaybackSettings::DESPAWN };
         commands.spawn((
-            Name::new(format!("engine of {}", h.spec.name)),
+            Name::new(format!("engine of {name}")),
             AudioPlayer::new(handle),
             // The volume is set every frame once the sink exists.
             settings.with_volume(Volume::Linear(0.0)).with_speed(pitch),

@@ -321,10 +321,10 @@ fn helicopter_triggers(
     helicopters: Query<(Entity, &crate::helicopter::Helicopter)>,
     cars: Query<(Entity, &crate::cars::Car)>,
     players: Query<(&Player, Option<&PlayerLives>)>,
-    pilots: Query<(Entity, &crate::vehicles::Piloting), Allow<Disabled>>,
+    pilots: Query<(Entity, &crate::vehicles::Piloting, &crate::player::ControlledBy), Allow<Disabled>>,
     mut sounds: MessageWriter<PlaySound>,
     net: Res<crate::net::Net>,
-    mut inside: Local<std::collections::HashMap<Entity, (usize, Vec<u32>)>>,
+    mut inside: Local<std::collections::HashMap<(Entity, usize), Vec<u32>>>,
 ) {
     let end = &mut *end;
     let decides = net.decides();
@@ -333,25 +333,31 @@ fn helicopter_triggers(
     let player_of = |slot: Option<Entity>| slot.and_then(|slot| players.get(slot).ok()).map(|(p, _)| p.index);
     let mut vehicles: Vec<(Entity, usize, Option<sticks_sim::physics::Body>)> = Vec::new();
     for (entity, heli) in &helicopters {
-        let Some(player) = player_of(heli.pilot()) else { continue };
-        let body = sticks_sim::physics::Body { position: heli.body.position, velocity: heli.body.linear_velocity, gravity_scale: 0.0, layer: heli.layer, shape: heli.shape.clone() };
-        vehicles.push((entity, player, heli.alive().then_some(body)));
+        // The pilot and every gunner (`HelicopterGunnerControl` seats are under the same root).
+        let controllers = std::iter::once(heli.pilot()).chain(heli.seats().map(|(_, s)| s.gunner()));
+        for player in controllers.filter_map(player_of) {
+            let body = sticks_sim::physics::Body { position: heli.body.position, velocity: heli.body.linear_velocity, gravity_scale: 0.0, layer: heli.layer, shape: heli.shape.clone() };
+            vehicles.push((entity, player, heli.alive().then_some(body)));
+        }
     }
     for (entity, car) in &cars {
-        let Some(player) = player_of(car.driver()) else { continue };
-        vehicles.push((entity, player, car.alive().then(|| car.trigger_body())));
+        // The driver and every passenger (`PassengerControl` seats are under the same root).
+        let controllers = std::iter::once(car.driver()).chain(car.passengers.iter().map(|p| p.slot.controller())).chain(car.gunners.iter().map(|g| g.gunner()));
+        for player in controllers.filter_map(player_of) {
+            vehicles.push((entity, player, car.alive().then(|| car.trigger_body())));
+        }
     }
     let mut seen = Vec::new();
     for (entity, player, body) in vehicles {
-        seen.push(entity);
+        seen.push((entity, player));
         let now = body.map(|b| b.overlapping_triggers(&collision.world, &collision.rules)).unwrap_or_default();
-        let before = inside.get(&entity).filter(|(p, _)| *p == player).map(|(_, t)| t.clone()).unwrap_or_default();
+        let before = inside.get(&(entity, player)).cloned().unwrap_or_default();
         for &collider in now.iter().filter(|c| !before.contains(c)) {
             let Some(object) = trigger_object(collider) else { continue };
             // `TimeLimit.OnTriggerEnter2D`: the player controlling the vehicle finished.
             if let Some(limit) = end.time_limit.as_mut() {
                 if limit.object == object && decides && !limit.expired && !limit.finished.contains(&player) {
-                    if let Some((avatar, _)) = pilots.iter().find(|(_, p)| p.vehicle == entity) {
+                    if let Some((avatar, _, _)) = pilots.iter().find(|(_, p, by)| p.vehicle == entity && player_of(Some(by.0)) == Some(player)) {
                         limit.finished.push(player);
                         limit.to_show.push((avatar, limit.time_left));
                         sounds.write(PlaySound { group: "Applause".to_owned(), at: None, owner: None });
@@ -376,12 +382,13 @@ fn helicopter_triggers(
                 }
             }
         }
-        inside.insert(entity, (player, now));
+        inside.insert((entity, player), now);
     }
     // A vehicle nobody controls any more has left its triggers (its pilot got out or died).
-    let gone: Vec<Entity> = inside.keys().copied().filter(|e| !seen.contains(e)).collect();
-    for entity in gone {
-        if let Some((player, before)) = inside.remove(&entity) {
+    let gone: Vec<(Entity, usize)> = inside.keys().copied().filter(|e| !seen.contains(e)).collect();
+    for key in gone {
+        let player = key.1;
+        if let Some(before) = inside.remove(&key) {
             for collider in before {
                 let Some(object) = trigger_object(collider) else { continue };
                 for ender in &mut end.enders {

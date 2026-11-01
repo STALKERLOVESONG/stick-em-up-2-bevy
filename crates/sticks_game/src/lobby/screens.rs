@@ -98,6 +98,8 @@ pub(super) struct Screens {
     unlock_presses: u32,
     fps_presses: u32,
     ending_presses: u32,
+    /// `ShowEndingCheat` asked for `LevelLoader.GameComplete()` this frame.
+    pub(super) show_ending: bool,
     version_checked: bool,
     /// The progress marks of the achievements screens this frame (renderer world position, lines).
     pub(super) goal_marks: Vec<(unity_compat::Vec3, Vec<([f32; 3], [f32; 3], f32, [u8; 4])>)>,
@@ -168,9 +170,8 @@ pub(super) fn mouse_down(lobby: &mut Lobby, memory: &mut LobbyMemory, object: us
         lobby.screens.ending_presses += 1;
         if lobby.screens.ending_presses >= CHEAT_PRESS_COUNT {
             lobby.screens.ending_presses = 0;
-            // TODO: `LevelLoader.GameComplete()` loads the "Complete" ending scene, which is not
-            // reconstructed.
-            bevy::log::warn!("the ending scene is not reconstructed");
+            // `LevelLoader.GameComplete()`: `lobby_update` loads the "Complete" scene.
+            lobby.screens.show_ending = true;
         }
     }
 }

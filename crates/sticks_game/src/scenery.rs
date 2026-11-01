@@ -2,6 +2,10 @@
 //!
 //! * `HorizontalScroller2D` bodies (Japan's clouds) drift with the fixed steps and wrap; their
 //!   sprites follow through [`SpriteFollowOffsets`].
+//! * `StarShower` (Moon): stars fall on the players and rovers between its x bounds (on the
+//!   machine that decides; they are ordinary enemy projectiles from there on).
+//! * `Whale`s (Pirates) rise and sink on their timers; their colliders are moving obstacles for
+//!   the characters (`helicopter::publish_hulls` gathers them) and their sprites follow.
 //! * Breakable props (Japan's hanging lamps, any `Health` + `ExplodeOnHealthExhausted` object):
 //!   `SetLayerInCampaignMode` on load; a projectile hit (`DamageOtherOnCollision` →
 //!   [`LevelColliderHit`]) takes health; when it is exhausted the prop explodes
@@ -54,6 +58,8 @@ struct Props {
     items: Vec<Prop>,
     /// Exploding-sprite art and atlas texture by collection GUID.
     arts: HashMap<String, (VisualArt, u32)>,
+    /// `DestroyAllForGoal.remaining`: the goal props still standing (counted with one player only).
+    goal_remaining: usize,
 }
 
 pub struct SceneryPlugin;
@@ -68,7 +74,10 @@ impl Plugin for SceneryPlugin {
             })
             .init_resource::<Waves>()
             .add_systems(OnEnter(AppState::InGame), start_waves)
-            .add_systems(Update, (step_scrollers, step_waves).chain().in_set(crate::FrameSet::FixedSteps).after(crate::player::run_fixed_steps))
+            .init_resource::<Whales>()
+            .add_systems(OnEnter(AppState::InGame), start_whales)
+            .add_systems(Update, star_showers.in_set(crate::FrameSet::Characters).run_if(crate::net::decides).run_if(in_state(AppState::InGame)))
+            .add_systems(Update, (step_scrollers, step_waves, step_whales).chain().in_set(crate::FrameSet::FixedSteps).after(crate::player::run_fixed_steps))
             .add_systems(
                 Update,
                 (
@@ -128,6 +137,137 @@ fn step_waves(clock: Res<FrameClock>, mut waves: ResMut<Waves>, offsets: Option<
         let wobble = (*time * spec.velocity[1] * std::f32::consts::PI * 2.0).sin() * spec.oscillation_amplitude;
         let y = if size[1] != 0.0 { wobble % size[1] } else { wobble };
         offsets.0.push([x * spec.parent_scale[0], y * spec.parent_scale[1]]);
+    }
+}
+
+/// `StarShower.Update` (`ServerOnly`): one random target of its `Targeter` (no qualifiers: every
+/// `Targetable`: the players, the rovers' and helicopters' "Target"s); in range, a star falls with
+/// probability `Δt × rate × targets` this frame.
+#[allow(clippy::too_many_arguments)]
+fn star_showers(
+    mut commands: Commands,
+    clock: Res<FrameClock>,
+    collision: Res<Collision>,
+    session: Res<Session>,
+    level: Res<ActiveLevel>,
+    library: Option<Res<crate::weapon::ProjectileLibrary>>,
+    mut rng: ResMut<DeathRng>,
+    players: Query<(&crate::player::Avatar, &crate::life::Mortal), With<crate::player::ControlledBy>>,
+    cars: Query<&crate::cars::Car>,
+    helicopters: Query<&crate::helicopter::Helicopter>,
+) {
+    let Some(library) = library else { return };
+    if level.0.star_showers.is_empty() {
+        return;
+    }
+    let delta = clock.stepper.frame().delta;
+    // (position, is a car)
+    let mut targets: Vec<(unity_compat::Vec2, bool)> = helicopters.iter().filter_map(|h| h.target_candidate().map(|c| (unity_compat::Vec2::new(c.position.x, c.position.y), false))).collect();
+    targets.extend(cars.iter().filter_map(|c| c.target_position().map(|p| (p, true))));
+    targets.extend(players.iter().filter(|(_, m)| m.avatar_active()).map(|(a, _)| {
+        let p = a.position();
+        (unity_compat::Vec2::new(p.x, p.y + crate::camera::CAMERA_TARGET_HEIGHT), false)
+    }));
+    let count = targets.len();
+    if count == 0 {
+        return;
+    }
+    let gravity = collision.rules.gravity;
+    for shower in &level.0.star_showers {
+        let Some(star) = library.0.get(&shower.prefab) else { continue };
+        let (target, is_car) = targets[rng.0.range_int(0, count as i32) as usize];
+        let Some(mut rate) = sticks_sim::scenery::star_rate(shower, target.x) else { continue };
+        let mut spread = shower.random_range;
+        if is_car {
+            rate *= shower.vehicle_rate_multiplier;
+            spread *= shower.vehicle_rate_multiplier;
+        }
+        rate *= count as f32;
+        if rng.0.value() >= delta * rate {
+            continue;
+        }
+        let [mut x, y] = sticks_sim::scenery::star_launch_point(shower, [target.x, target.y], gravity.y);
+        x += spread * (rng.0.value() - 0.5);
+        let damage = match &star.damage_scaling {
+            Some(s) if session.mode == GameMode::Campaign => difficulty_modified(star.damage, &s.amount, s.affected_by_player_count, session.player_count as i32, session.difficulty),
+            _ => star.damage,
+        };
+        let [vx, vy] = shower.launch_velocity;
+        let spin = shower.launch_angular_velocity_min + (shower.launch_angular_velocity_max - shower.launch_angular_velocity_min) * rng.0.value();
+        let shot = sticks_sim::weapons::Shot::launch(star, damage, unity_compat::Vec2::new(x, y), unity_compat::Vec2::new(vx, vy), 0.0, crate::enemy::ENEMY_TEAM, gravity).unrotated_with_spin(spin);
+        commands.spawn((Name::new(star.name.clone()), crate::weapon::Projectile::new(shot, star.clone(), None)));
+    }
+}
+
+/// Collider ids of the whales as moving obstacles (apart from the level's, hulls' and cars').
+pub(crate) const WHALE_COLLIDER_BASE: u32 = 0x7E00_0000;
+
+/// One `Whale`: its spec, its collider's convex pieces at rest (world), layer and height now.
+struct WhaleState {
+    spec: unity_data::scenery::WhaleSpec,
+    pieces: Vec<Vec<unity_compat::Vec2>>,
+    layer: u8,
+    offset: f32,
+}
+
+/// The whales and the time since the level started (`OnLoadedLevelEverywhere`).
+#[derive(Resource, Default)]
+pub(crate) struct Whales {
+    whales: Vec<WhaleState>,
+    time: f32,
+}
+
+impl Whales {
+    /// The whales' colliders where they are now (moving obstacles).
+    pub(crate) fn obstacles(&self) -> Vec<(sticks_sim::physics::StaticCollider, Vec<Vec<unity_compat::Vec2>>)> {
+        self.whales
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                // TODO(UNCERTAIN): the original records a whale's top as a safe respawn place like
+                // any ground; once it has sunk, respawning there drops the player into the sea
+                // again and again, so here it is never a respawn place.
+                let collider = sticks_sim::physics::StaticCollider { id: WHALE_COLLIDER_BASE + i as u32, layer: w.layer, unsafe_ground: true, ..Default::default() };
+                let lift = unity_compat::Vec2::new(0.0, w.offset);
+                (collider, w.pieces.iter().map(|piece| piece.iter().map(|p| *p + lift).collect()).collect())
+            })
+            .collect()
+    }
+}
+
+/// `Whale.Start`: the whale's polygon collider (a dynamic collider of the level) in convex pieces.
+fn start_whales(mut commands: Commands, level: Res<ActiveLevel>) {
+    use sticks_sim::physics::{merge_convex, triangulate};
+    let whales = level
+        .0
+        .whales
+        .iter()
+        .map(|spec| {
+            let mut layer = 0;
+            let mut pieces = Vec::new();
+            for c in level.0.colliders.iter().filter(|c| c.object == spec.object && !c.trigger && c.enabled) {
+                if let unity_data::level::Shape::Polygon(path) = &c.shape {
+                    layer = c.layer;
+                    pieces.extend(merge_convex(triangulate(&path.iter().map(|p| unity_compat::Vec2::new(p[0], p[1])).collect::<Vec<_>>())));
+                }
+            }
+            WhaleState { spec: spec.clone(), pieces, layer, offset: 0.0 }
+        })
+        .collect();
+    commands.insert_resource(Whales { whales, time: 0.0 });
+}
+
+/// `Whale.Go` each frame; the sprites follow (after the scrollers' and waves' offsets).
+fn step_whales(clock: Res<FrameClock>, level: Res<ActiveLevel>, mut whales: ResMut<Whales>, offsets: Option<ResMut<SpriteFollowOffsets>>) {
+    let whales = &mut *whales;
+    whales.time += clock.stepper.frame().delta;
+    for w in &mut whales.whales {
+        w.offset = sticks_sim::scenery::whale_offset(&w.spec, whales.time);
+    }
+    if let Some(mut offsets) = offsets {
+        let base = level.0.scrollers.len() + level.0.waves.len();
+        offsets.0.resize(base, [0.0, 0.0]);
+        offsets.0.extend(whales.whales.iter().map(|w| [0.0, w.offset]));
     }
 }
 
@@ -193,6 +333,10 @@ fn set_up_props(
         }
         props.items.push(Prop { spec: index, health, phase: PropPhase::Alive, parts, collection });
     }
+    // `DestroyAllForGoal.Awake`: only a one-player game counts.
+    if session.player_count == 1 {
+        props.goal_remaining = level.0.props.iter().filter(|p| p.destroy_all_for_goal).count();
+    }
     if !props.items.is_empty() {
         info!("{} breakable props", props.items.len());
     }
@@ -212,6 +356,8 @@ fn hit_props(
     mut collision: ResMut<Collision>,
     mut hidden: Option<ResMut<HiddenSprites>>,
     mut sounds: MessageWriter<PlaySound>,
+    mut memory: ResMut<crate::lobby::LobbyMemory>,
+    players: Query<&crate::player::Player>,
 ) {
     let props = &mut *props;
     for hit in hits.read() {
@@ -221,6 +367,21 @@ fn hit_props(
             continue;
         }
         let spec = &level.0.props[prop.spec];
+        // `DestroyAllForGoal`'s `Exhausted` handler: the last one gives the first active player
+        // "<loaded level name> all destroyed".
+        if spec.destroy_all_for_goal && props.goal_remaining > 0 {
+            props.goal_remaining -= 1;
+            if props.goal_remaining == 0 {
+                if let Some(player) = players.iter().map(|p| p.index).min() {
+                    let id = sticks_sim::level_end::PlayerId::anonymous_local(player);
+                    let goal = format!("{} all destroyed", level.0.name.to_lowercase());
+                    info!("goal: {goal}");
+                    if memory.goals.goal_done(&id, &goal, None) {
+                        memory.save.goals = true;
+                    }
+                }
+            }
+        }
         let at = SimVec3::new(spec.position[0], spec.position[1], spec.position[2]);
         // `PlaySoundOnExplode`.
         if let Some(sound) = &spec.sound {

@@ -20,8 +20,8 @@
 //! TODO(UNCERTAIN): the rotor blades are not among the exploding parts, and a respawned
 //! helicopter starts at rest.
 //!
-//! The seated occupants (`VehicleOccupant`) are drawn with [`ManArt::occupant_renderers`]; the
-//! gunner seats do not follow a gunner yet.
+//! The seated occupants (`VehicleOccupant`) are drawn with [`ManArt::occupant_renderers`]; a
+//! gunner seat's occupant shows its gunner (`HelicopterGunnerControl`, boarded in `vehicles`).
 //! TODO(UNCERTAIN): `HelicopterInput` and the AI behaviours share execution order 0; the input is
 //! taken to copy the processor before the behaviours run (component order), so the flight acts on
 //! the previous frame's decision, as for enemy soldiers.
@@ -80,6 +80,25 @@ struct Gun {
     launcher: Launcher,
     angle: f32,
     active: bool,
+    /// Its gunner seat (`HelicopterGunnerControl` with a `ControlSlot`, players' helicopters).
+    pub(crate) seat: Option<GunnerSeat>,
+}
+
+/// A gunner seat: who sits in it and their `HelicopterGunnerInput` this frame.
+pub(crate) struct GunnerSeat {
+    pub(crate) slot: ControlSlot<Entity>,
+    pub(crate) exit_latch: ExitLatch,
+    pub(crate) exit: bool,
+    pub(crate) fire: bool,
+    pub(crate) aim: Option<HeliAim>,
+    /// The gunner's team (their shots' layer).
+    pub(crate) team: u8,
+}
+
+impl GunnerSeat {
+    pub(crate) fn gunner(&self) -> Option<Entity> {
+        self.slot.controller()
+    }
 }
 
 #[derive(Component)]
@@ -286,11 +305,60 @@ impl Helicopter {
     /// every gunner control its input; a player's helicopter only gives the pilot's input to
     /// `singlePlayerGunnerControl`, and only when the pilot is also a gunner
     /// (`IsPilotAlsoAGunner`: one active player when control was taken). The other guns' own
-    /// `ControlSlot`s are gunner seats for further local players.
-    /// TODO: the gunner seats (`HelicopterGunnerControl` with `KeyboardAndMouseHelicopterGunnerInput`)
-    /// are not boardable, so with several players a player helicopter's guns stay silent.
+    /// `ControlSlot`s are gunner seats for further players (their own input aims and fires it).
     fn gun_has_input(&self, g: usize) -> bool {
-        if self.spec.enemy.is_some() { self.controlled } else { self.pilot().is_some() && self.pilot_is_gunner && self.spec.single_player_gun == Some(g) }
+        if self.spec.enemy.is_some() {
+            return self.controlled;
+        }
+        self.gunner(g).is_some() || (self.pilot().is_some() && self.pilot_is_gunner && self.spec.single_player_gun == Some(g))
+    }
+
+    /// The player in gun `g`'s seat.
+    pub(crate) fn gunner(&self, g: usize) -> Option<Entity> {
+        self.guns.get(g).and_then(|gun| gun.seat.as_ref()).and_then(GunnerSeat::gunner)
+    }
+
+    /// The gunner seats (gun index, seat), for boarding and input.
+    pub(crate) fn seats_mut(&mut self) -> impl Iterator<Item = (usize, &mut GunnerSeat)> {
+        self.guns.iter_mut().enumerate().filter_map(|(g, gun)| gun.seat.as_mut().map(|s| (g, s)))
+    }
+
+    pub(crate) fn seats(&self) -> impl Iterator<Item = (usize, &GunnerSeat)> {
+        self.guns.iter().enumerate().filter_map(|(g, gun)| gun.seat.as_ref().map(|s| (g, s)))
+    }
+
+    /// `HelicopterGunnerControl.SetController`: `player` takes gun `g`'s seat; its launchers follow
+    /// their `HelicopterGunnerInput` and their shots go on the gunner's team layer.
+    pub(crate) fn take_seat(&mut self, g: usize, player: Entity, team: u8) {
+        let Some(seat) = self.guns.get_mut(g).and_then(|gun| gun.seat.as_mut()) else { return };
+        seat.slot.set_controller(player);
+        seat.exit_latch.on_set_controller();
+        seat.team = team;
+        seat.fire = false;
+        seat.exit = false;
+    }
+
+    /// `HelicopterGunnerControl.ClearController`: the launchers lose the gunner's input.
+    pub(crate) fn leave_seat(&mut self, g: usize) -> Option<Entity> {
+        let seat = self.guns.get_mut(g).and_then(|gun| gun.seat.as_mut())?;
+        seat.fire = false;
+        seat.exit = false;
+        seat.aim = None;
+        seat.slot.clear_controller()
+    }
+
+    /// Where gun `g`'s seat is (its `ControlSlot` sits on the gun).
+    pub(crate) fn seat_position(&self, g: usize) -> SimVec3 {
+        let p = self.node_world(self.spec.guns[g].node, &self.root_affine()).t;
+        SimVec3::new(p[0], p[1], p[2])
+    }
+
+    /// The aim and trigger gun `g` follows: its gunner's, else the pilot's.
+    fn gun_input(&self, g: usize) -> (bool, Option<HeliAim>) {
+        match self.guns.get(g).and_then(|gun| gun.seat.as_ref()).filter(|s| s.gunner().is_some()) {
+            Some(seat) => (seat.fire, seat.aim),
+            None => (self.input.1, self.input.2),
+        }
     }
 
     /// `CameraPositionInfluencer` on the "Camera Influencer", enabled while the root slot has a
@@ -524,6 +592,7 @@ fn spawn_helicopters(
                 launcher: Launcher::new(modified(g.firing_rate_time, &g.firing_rate_scaling), g.fully_automatic, false),
                 angle: 0.0,
                 active: in_hierarchy(g.node),
+                seat: (g.control_slot && spec.enemy.is_none()).then(|| GunnerSeat { slot: ControlSlot::new(g.control_radius), exit_latch: ExitLatch::default(), exit: false, fire: false, aim: None, team: 0 }),
             })
             .collect();
         let hull: Vec<Vec<SimVec2>> = spec
@@ -664,7 +733,7 @@ fn fly_helicopters(clock: Res<FrameClock>, collision: Res<Collision>, mut helico
 /// left it.
 /// TODO(UNCERTAIN): the characters push nothing back (their mass against the helicopter's is
 /// ignored), and a hull is not interleaved step by step with the characters' fixed steps.
-fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopter>, cars: Query<&crate::cars::Car>) {
+fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopter>, cars: Query<&crate::cars::Car>, whales: Option<Res<crate::scenery::Whales>>) {
     let mut items: Vec<_> = helicopters
         .iter()
         .filter(|h| h.is_active_object())
@@ -677,6 +746,10 @@ fn publish_hulls(mut collision: ResMut<Collision>, helicopters: Query<&Helicopte
         .collect();
     // The cars' chassis and wheels too (`crate::cars`).
     items.extend(crate::cars::car_obstacles(&cars));
+    // And Pirates' whales (`crate::scenery`).
+    if let Some(whales) = whales {
+        items.extend(whales.obstacles());
+    }
     collision.world.set_moving(items);
 }
 
@@ -878,18 +951,19 @@ pub(crate) fn think_helicopters(collision: Res<Collision>, players: Query<(&Avat
                 }
             }
         }
-        // `HelicopterGunnerControl.Update`: a gun with an input faces `RelativeAim(gun position)`.
-        if h.controlled {
-            if let Some(aim) = h.input.2 {
-                for g in 0..h.guns.len() {
-                    if !h.guns[g].active || !h.gun_has_input(g) {
-                        continue;
-                    }
-                    let node = h.spec.guns[g].node;
-                    let p = h.node_world(node, &root).t;
-                    h.guns[g].angle = gun_angle_degrees(aim.relative_to(p));
-                }
+        // `HelicopterGunnerControl.Update`: a gun with an input faces `RelativeAim(gun position)`
+        // (its gunner's aim, or the pilot's).
+        for g in 0..h.guns.len() {
+            if !h.guns[g].active || !h.gun_has_input(g) {
+                continue;
             }
+            if h.gunner(g).is_none() && !h.controlled {
+                continue;
+            }
+            let Some(aim) = h.gun_input(g).1 else { continue };
+            let node = h.spec.guns[g].node;
+            let p = h.node_world(node, &root).t;
+            h.guns[g].angle = gun_angle_degrees(aim.relative_to(p));
         }
     }
 }
@@ -926,16 +1000,20 @@ fn fire_helicopter_guns(
     let Some(library) = library else { return };
     let delta = clock.stepper.frame().delta;
     for mut h in &mut helicopters {
-        if h.asleep.is_some() || !h.alive() || !h.controlled {
+        if h.asleep.is_some() || !h.alive() {
             continue;
         }
-        let (fire, aim) = (h.input.1, h.input.2);
         let root = h.root_affine();
         for g in 0..h.guns.len() {
             // `ProjectileLauncher.Update` returns at once without an input.
             if !h.guns[g].active || !h.gun_has_input(g) {
                 continue;
             }
+            let gunner = h.gunner(g);
+            if gunner.is_none() && !h.controlled {
+                continue;
+            }
+            let (fire, aim) = h.gun_input(g);
             let Some(launch) = h.guns[g].launcher.update(fire, clock.time, delta) else { continue };
             let spec_gun = &h.spec.guns[g];
             let Some(spec) = library.0.get(&spec_gun.projectile) else { continue };
@@ -949,7 +1027,11 @@ fn fire_helicopter_guns(
             };
             // A player's input object is the `Player`: `SetResponsiblePlayer` credits it (and
             // gives its team); an enemy's input object is not, so the shot is team 1.
-            let (team, responsible) = if h.spec.enemy.is_some() { (ENEMY_TEAM, None) } else { (h.pilot_team.into(), h.pilot()) };
+            let (team, responsible) = match (h.spec.enemy.is_some(), gunner) {
+                (true, _) => (ENEMY_TEAM, None),
+                (false, Some(gunner)) => (h.guns[g].seat.as_ref().map_or(0, |s| s.team).into(), Some(gunner)),
+                (false, None) => (h.pilot_team.into(), h.pilot()),
+            };
             let shot = Shot::launch(spec, damage, SimVec2::new(muzzle[0], muzzle[1]), direction, launch.sub_frame_offset, team, collision.rules.gravity);
             commands.spawn((Name::new(spec.name.clone()), Projectile::new(shot, spec.clone(), responsible)));
             // `MasterAudio.PlaySound3DAtTransformAndForget(firingSound, launcher)`.
@@ -961,7 +1043,8 @@ fn fire_helicopter_guns(
 }
 
 /// Lines with their shadows (`LinesRenderer` at `origin`), as one renderer.
-fn lines_geometry(lines: &[StickLine], origin: SimVec3, light: Option<SimVec3>, line_uvs: [[f32; 2]; 8]) -> Geometry {
+/// `LinesRenderer` lines with their shadows cast from `origin` onto each line's plane.
+pub(crate) fn lines_geometry(lines: &[StickLine], origin: SimVec3, light: Option<SimVec3>, line_uvs: [[f32; 2]; 8]) -> Geometry {
     let mut shadows = Vec::new();
     for line in lines {
         let (delta, k) = light.map_or(([0.0, 0.0], 1.0), |l| shadow_offset_and_scale(l, origin, line.shadow_plane_z));
@@ -996,7 +1079,7 @@ fn queue_helicopters(
     rigs: Query<&Rig, With<LevelCamera>>,
     animation: Option<Res<crate::level::CharacterAnimation>>,
     mut helicopters: Query<(Entity, &mut Helicopter)>,
-    pilots: Query<(&crate::vehicles::Piloting, Option<&crate::figure::Palette>), With<Disabled>>,
+    pilots: Query<(&crate::vehicles::Piloting, &ControlledBy, Option<&crate::figure::Palette>), With<Disabled>>,
     mut queue: ResMut<FrameQueue>,
 ) {
     let Some(art) = art else { return };
@@ -1082,28 +1165,31 @@ fn queue_helicopters(
         // `VehicleOccupant`s: the pilot while a player flies (`HelicopterControl.SetController`,
         // in the player's colours); an enemy's pilot and any passenger as the scene enables them.
         // TODO(UNCERTAIN): occupants not coloured by a player use the `Man` prefab's colours
-        // (the occupant prefab's helmet is the same red); gunner seats follow no gunner yet.
+        // (the occupant prefab's helmet is the same red).
         if let Some(animation) = animation.as_ref() {
             let piloted = h.pilot().is_some();
-            let seats: Vec<(&unity_data::vehicles::OccupantSeat, bool)> = h
+            // The gunner seats' occupants show their gunners (`HelicopterGunnerControl`).
+            let gunner_of = |node: usize| h.spec.guns.iter().position(|g| g.occupant == Some(node)).map(|g| h.gunner(g));
+            let seats: Vec<(&unity_data::vehicles::OccupantSeat, bool, Option<Entity>)> = h
                 .spec
                 .pilot
                 .iter()
-                .map(|seat| (seat, piloted || (h.spec.enemy.is_some() && seat.enabled)))
-                .chain(h.spec.passengers.iter().map(|seat| (seat, seat.enabled)))
+                .map(|seat| (seat, piloted || (h.spec.enemy.is_some() && seat.enabled), if piloted { h.pilot() } else { None }))
+                .chain(h.spec.passengers.iter().map(|seat| match gunner_of(seat.node) {
+                    Some(gunner) => (seat, gunner.is_some(), gunner),
+                    None => (seat, seat.enabled, None),
+                }))
                 .collect();
-            for (seat, shown) in seats {
+            for (seat, shown, controller) in seats {
                 if !shown || !h.active_in_hierarchy(seat.node) {
                     continue;
                 }
-                let is_pilot = h.spec.pilot.as_ref().is_some_and(|p| p.node == seat.node);
-                let palette = (is_pilot && piloted)
-                    .then(|| pilots.iter().find(|(p, _)| p.vehicle == entity).and_then(|(_, p)| p.map(|p| p.0)))
-                    .flatten()
+                let palette = controller
+                    .and_then(|player| pilots.iter().find(|(p, c, _)| p.vehicle == entity && c.0 == player).and_then(|(_, _, p)| p.map(|p| p.0)))
                     .unwrap_or_else(|| art.prefab_palette());
                 let world = h.node_world(seat.node, &root);
                 let at = SimVec3::new(world.t[0], world.t[1], world.t[2]);
-                renderers.extend(art.occupant_renderers(&animation.0, &seat.animation_state, at, h.node_rotation(seat.node), palette, light));
+                renderers.extend(art.occupant_renderers(&animation.0, &seat.animation_state, at, h.node_rotation(seat.node), palette, light, None));
             }
         }
         for (texture, g) in renderers {

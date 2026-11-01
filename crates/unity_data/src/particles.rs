@@ -358,6 +358,12 @@ pub fn parse_particle_system(body: &Value) -> ParticleSystemSpec {
 pub fn parse_particle_effect(scene: &Scene, scripts: &ScriptIndex) -> Option<ParticleEffectSpec> {
     let objects = scene.game_objects();
     let root = *objects.iter().find(|g| g.parent().is_none())?;
+    particle_effect_of(&root, scripts)
+}
+
+/// The `ParticleSystem` (with its `ParticleSystemLines` drawing) on one object, in a prefab or a
+/// level scene.
+pub fn particle_effect_of(root: &crate::scene::GameObject<'_>, scripts: &ScriptIndex) -> Option<ParticleEffectSpec> {
     let system = root.components().into_iter().find(|c| c.class_id == PARTICLE_SYSTEM)?;
     let mut spec = ParticleEffectSpec {
         name: root.name().to_owned(),

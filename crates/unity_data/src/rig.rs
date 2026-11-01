@@ -86,6 +86,9 @@ pub struct WeaponSpec {
     pub firing_sound: String,
     /// Bones with a `FlatSprite` inside this weapon (its visible parts).
     pub sprite_bones: Vec<usize>,
+    /// `AimVisualizer` on the launcher (the Spear's charging arc): the highest difficulty it is
+    /// kept at (`MaximumDifficultyLevelComponents` destroys it above; `i32::MAX` without one).
+    pub aim_visualizer: Option<i32>,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +144,10 @@ pub fn parse_rig(scene: &Scene, scripts: &ScriptIndex) -> Option<Rig> {
     let mut flat_component_bone: HashMap<FileId, usize> = HashMap::new();
     let mut color_doc = None;
     let mut launchers: Vec<(usize, &crate::yaml::Document)> = Vec::new();
+    // `AimVisualizer` components (bone, component id) and `MaximumDifficultyLevelComponents`
+    // (maximum difficulty, the components it governs).
+    let mut aim_visualizers: Vec<(usize, FileId)> = Vec::new();
+    let mut difficulty_caps: Vec<(i32, Vec<FileId>)> = Vec::new();
     for (index, (go, parent)) in order.iter().enumerate() {
         let transform = go.transform()?;
         let mut lines = None;
@@ -184,6 +191,11 @@ pub fn parse_rig(scene: &Scene, scripts: &ScriptIndex) -> Option<Rig> {
                 }
                 Some("CharacterColor") => color_doc = Some(component),
                 Some("ProjectileLauncher") => launchers.push((index, component)),
+                Some("AimVisualizer") if component.body.bool_of("m_Enabled").unwrap_or(true) => aim_visualizers.push((index, component.file_id)),
+                Some("MaximumDifficultyLevelComponents") => difficulty_caps.push((
+                    component.body.i64_of("maximumDifficultyLevel").unwrap_or(0) as i32,
+                    component.body.get("components").map(Value::as_seq).unwrap_or(&[]).iter().filter_map(Value::file_id).collect(),
+                )),
                 _ => {}
             }
         }
@@ -230,7 +242,15 @@ pub fn parse_rig(scene: &Scene, scripts: &ScriptIndex) -> Option<Rig> {
         face: *cc.get("face").and_then(Value::file_id).and_then(|id| lines_component_bone.get(&id))?,
         helmet: *cc.get("helmet").and_then(Value::file_id).and_then(|id| flat_component_bone.get(&id))?,
     };
-    let weapons = parse_weapons(&bones, &by_path, &launchers, &transform_to_bone);
+    let mut weapons = parse_weapons(&bones, &by_path, &launchers, &transform_to_bone);
+    for w in &mut weapons {
+        let Some(&(_, component)) = aim_visualizers.iter().find(|(bone, _)| Some(*bone) == w.launch_point) else { continue };
+        // TODO(UNCERTAIN): `MaximumDifficultyLevelComponents` is not in the decompiled source; by
+        // its name and fields (as `MinimumDifficulty` the other way) it destroys its components
+        // above `maximumDifficultyLevel`.
+        let cap = difficulty_caps.iter().filter(|(_, c)| c.contains(&component)).map(|(m, _)| *m).min().unwrap_or(i32::MAX);
+        w.aim_visualizer = Some(cap);
+    }
     Some(Rig { bones, root: 0, colors, weapons, by_path })
 }
 
@@ -272,6 +292,7 @@ fn parse_weapons(
                 projectile: body.and_then(|b| b.get("prefab")).and_then(Value::guid).unwrap_or("").to_owned(),
                 firing_sound: body.and_then(|b| b.str_of("firingSound")).unwrap_or("").to_owned(),
                 sprite_bones: (0..bones.len()).filter(|&i| bones[i].flat_sprite.is_some() && within(i, weapon)).collect(),
+                aim_visualizer: None,
             }
         })
         .collect()

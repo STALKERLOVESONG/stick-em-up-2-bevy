@@ -367,6 +367,28 @@ impl World {
         hits.into_iter().map(|(_, id)| id).collect()
     }
 
+    /// `Physics2D.Raycast(origin, Vector2.down, ∞, layerMask).point`: where the downward ray first
+    /// meets a collider on a masked layer (triggers only with `hit_triggers`; a ray starting
+    /// inside a collider hits it at the origin).
+    pub fn raycast_down_point(&self, origin: Vec2, layer_mask: u32, hit_triggers: bool) -> Option<Vec2> {
+        const REACH: f32 = 2000.0;
+        let probe = Aabb { min: Vec2::new(origin.x, origin.y - REACH), max: Vec2::new(origin.x, origin.y) };
+        let mut best: Option<f32> = None;
+        self.query(&probe, |entry| {
+            let c = &self.colliders[entry.collider];
+            if layer_mask >> c.layer & 1 == 0 || self.disabled[entry.collider] || (c.trigger && !hit_triggers) {
+                return;
+            }
+            if let Some(top) = piece_top_below(&entry.piece, origin) {
+                let top = top.min(origin.y);
+                if best.is_none_or(|b| top > b) {
+                    best = Some(top);
+                }
+            }
+        });
+        best.map(|y| Vec2::new(origin.x, y))
+    }
+
     /// `Physics2D.Linecast(start, end, layerMask)` used as a boolean: does any collider on a
     /// masked layer touch the segment? Triggers count when `hit_triggers` is set
     /// (`Physics2DSettings.m_RaycastsHitTriggers`), and a segment that starts inside a collider

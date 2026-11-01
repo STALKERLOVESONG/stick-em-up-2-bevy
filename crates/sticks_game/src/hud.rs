@@ -190,6 +190,9 @@ pub(crate) struct HudScene {
     layouts: Vec<(usize, [f32; 3])>,
     /// `TimerUI`: its object → the minutes, seconds and milliseconds texts.
     timers: HashMap<usize, [Option<usize>; 3]>,
+    /// The "Enter Vehicle" `ControlPrompt`'s "Keyboard And Mouse" and "Xboxish Gamepad" prompts
+    /// and its other children (the "Use" label).
+    enter_prompt: Option<(Option<usize>, Option<usize>, Vec<usize>)>,
 }
 
 impl HudScene {
@@ -307,7 +310,7 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::InGame), load_hud)
             .add_systems(OnExit(AppState::InGame), |mut commands: Commands| commands.remove_resource::<HudScene>())
-            .add_systems(Update, update_hud.in_set(FrameSet::Present).run_if(resource_exists::<HudScene>))
+            .add_systems(Update, (update_hud, show_enter_prompt).in_set(FrameSet::Present).run_if(resource_exists::<HudScene>))
             .add_systems(Update, layout_hud.in_set(HudLayout).after(FrameSet::Present).before(QueueSet::Draw).run_if(in_state(AppState::InGame)).run_if(resource_exists::<HudScene>))
             .add_systems(Update, draw_hud.in_set(QueueSet::Draw).run_if(resource_exists::<HudScene>));
     }
@@ -384,6 +387,22 @@ pub(crate) fn load_hud(
     };
     let in_game_ui = find("In-Game UI");
     let team_info = find("Team Info");
+    // `Input/Non-Touch Control Prompts` (its `Offset/Enter Vehicle` `ControlPrompt`).
+    let prompts = find("Non-Touch Control Prompts");
+    let enter_vehicle = prompts.and_then(|p| scene.child(p, "Offset")).and_then(|o| scene.child(o, "Enter Vehicle"));
+    if let Some(ev) = enter_vehicle {
+        // `LayoutControls`: its children one (child 1 − child 0) apart.
+        let children = &scene.objects[ev].children;
+        if let (Some(&a), Some(&b)) = (children.first(), children.get(1)) {
+            let (pa, pb) = (scene.objects[a].local_position, scene.objects[b].local_position);
+            layouts.push((ev, [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]]));
+        }
+    }
+    let enter_prompt = enter_vehicle.map(|ev| {
+        let named = |name: &str| scene.child(ev, name);
+        let others = scene.objects[ev].children.iter().copied().filter(|&c| !matches!(scene.objects[c].name.as_str(), "Keyboard And Mouse" | "Xboxish Gamepad" | "Steam Controller")).collect();
+        (named("Keyboard And Mouse"), named("Xboxish Gamepad"), others)
+    });
     let assets_dir = config.assets_dir();
     let mut load = TextureLoad::new(&assets_dir, &asset_server, &mut images, &mut materials);
     let mut libraries: HashMap<String, SpriteLibrary> = HashMap::new();
@@ -417,6 +436,7 @@ pub(crate) fn load_hud(
         level_ui,
         layouts,
         timers,
+        enter_prompt,
         scene,
     };
     let mut subtree = hud.descendants(player_info);
@@ -426,6 +446,9 @@ pub(crate) fn load_hud(
     let mut menus = in_game_ui.map(|root| hud.descendants(root)).unwrap_or_default();
     for &root in &level_roots {
         menus.extend(hud.descendants(root));
+    }
+    if let Some(p) = prompts {
+        menus.extend(hud.descendants(p));
     }
     subtree.extend(menus.iter().copied());
     for sprite in &hud.scene.sprites {
@@ -563,7 +586,8 @@ struct PlayerView<'a> {
     mortal: &'a Mortal,
     armament: &'a Armament,
     disabled: bool,
-    vehicle: Option<&'a Helicopter>,
+    /// The health left of the vehicle the player drives (`Health.Normalized`), if any.
+    vehicle: Option<f32>,
     palette: Option<&'a Palette>,
     /// `VersusScoreUI`: the definitive total once the game has ended, else `PlayerScore.Frags`.
     frags: i32,
@@ -583,15 +607,21 @@ fn update_hud(
     // `Has<Disabled>` keeps the avatar in view while its player flies a vehicle.
     avatars: Query<(&Mortal, &ControlledBy, &Armament, Has<Disabled>, Option<&Piloting>, Option<&Palette>), Without<Enemy>>,
     helicopters: Query<&Helicopter>,
+    cars: Query<&crate::cars::Car>,
+    level: Option<Res<crate::level::ActiveLevel>>,
 ) {
     let Some(art) = art else { return };
     let hud = &mut *hud;
+    // `HidePlayerInfo.OnEnable` / `OnDisable`: the "Complete" scene switches `Player Info` off.
+    let player_info = hud.player_info;
+    hud.active[player_info] = !level.as_ref().is_some_and(|l| l.0.hides_player_info);
     let mut teams: [Vec<(usize, [f32; 4], i32)>; 2] = [Vec::new(), Vec::new()];
     for (mortal, controlled_by, armament, disabled, piloting, palette) in &avatars {
         let Ok((player, lives, score)) = players.get(controlled_by.0) else { continue };
         // `Player.SetUp` for a vehicle hands `HealthUI` the vehicle's `Health` and
         // `WeaponIndicatorUI` no character controller.
-        let vehicle = piloting.and_then(|p| helicopters.get(p.vehicle).ok());
+        // A helicopter's or a car's (a car that cannot be destroyed keeps its bar full).
+        let vehicle = piloting.and_then(|p| helicopters.get(p.vehicle).ok().map(Helicopter::health_normalized).or_else(|| cars.get(p.vehicle).ok().map(|c| c.health_normalized())));
         let frags = versus.as_ref().and_then(|v| v.definitive.total(player.index)).unwrap_or(score.0.frags());
         let view = PlayerView { player, lives, mortal, armament, disabled, vehicle, palette, frags };
         let Some(info) = update_player_info(hud, &session, &clock, &art, &view) else { continue };
@@ -602,6 +632,23 @@ fn update_hud(
     }
     if session.mode == GameMode::TeamVersus {
         update_team_info(hud, &teams);
+    }
+}
+
+/// `ControlPrompt.LateUpdate` of the "Enter Vehicle" prompt: each control type's prompt is on
+/// while it was used this frame, the other children ("Use") while any is.
+fn show_enter_prompt(mut hud: ResMut<HudScene>, prompt: Res<crate::vehicles::EnterPrompt>) {
+    let hud = &mut *hud;
+    let Some((keyboard, gamepad, others)) = hud.enter_prompt.clone() else { return };
+    let mut any = false;
+    for (object, used) in [(keyboard, prompt.keyboard), (gamepad, prompt.gamepad)] {
+        if let Some(o) = object {
+            hud.active[o] = used;
+            any |= used;
+        }
+    }
+    for o in others {
+        hud.active[o] = any;
     }
 }
 
@@ -769,7 +816,7 @@ fn update_player_info(hud: &mut HudScene, session: &Session, clock: &FrameClock,
     // event fires on every change).
     if let Some(&bar) = slot.bars.get(slot.current) {
         if let Some(clipped) = hud.clipped_in(bar) {
-            let normalized = vehicle.map_or_else(|| mortal.health.normalized(), Helicopter::health_normalized);
+            let normalized = vehicle.unwrap_or_else(|| mortal.health.normalized());
             hud.sprites[clipped].clip = Some([[0.0, 0.0], [normalized, 1.0]]);
         }
     }

@@ -193,13 +193,99 @@ W/S set its speed and A/D tilt it, as `KeyboardAndMouseCarInput` does. Room UI: 
 button (bottom left) opens an online page (create, join by code, members, chat); rooms no longer
 wait for "ready".
 
+Level-logic pass (2026-11-01, later): Pirates' `Whale`s rise 14 units and sink on their timers
+(`SmoothStep` over `transitionTime`), as moving obstacles the characters stand on, with their
+sprites; Moon's `StarShower` drops "Star" bodies (damage 20, ×2 by difficulty in the campaign)
+on a random target — the players, the rovers' and helicopters' "Target"s — at the x-dependent
+rate (×10 rate and spread on a rover, × number of targets), from where they fall onto the target
+under the Moon's gravity (host only; clients see them through the usual projectile simulation
+only when the host's spawns reach them — TODO(UNCERTAIN)); Corruption 2's "Big Bad" explodes
+constantly (`ConstantExplosion`: its lines and sprites fly apart every 1/6 s, at most
+`ceil(3 / interval)` at once). TODO(UNCERTAIN): the boss's `ColorCycler (period 10)` is not in
+the decompiled source, so its colours stay put; projectiles pass through whales (moving
+obstacles only stop characters).
 
-- Effects: `SpawnLocallyOnExplode` prefabs other than particle effects; `ConstantExplosion` (Corruption 2); `Wave` (Pirates' water), `Whale`, `StarShower` and `Dock` (Moon).
-- HUD: off-screen `Pointers`, control prompts.
-- Lobby: touch input; `RemoteLevelAvailability` (levels another machine has unlocked); original Level Loading scene; achievement triggers outside level end (`rover 720/1440`, `four frag shot`, `office all destroyed`, `0 shot perfect health …`).
-- Level flow: the "Complete" ending scene, server/client menus; `TimeLimit` finishers are host-only in a network game.
-- Vehicles: gunner seats following a gunner (`CarGunnerControl`, `HelicopterGunnerControl`, `VehicleOccupantIK`); gunner/passenger seats for extra local players (with 2+ players a player helicopter's guns are silent until these exist); cars (`CarControl`, `WheelJoint2D`), rockets (`RocketControl`), cannons (`CannonControl`) — the contact solver exists now; cars still need Box2D's wheel joint; the "Enter Vehicle" control prompt.
-- Weapons: verify Shuriken, Pistol and Spear end to end in Japan / Pirates / Treetops; the Sword's swing animation trigger (`firingAnimator`); projectiles touching the sword's Damager.
+Weapons (same day): the firing animations of the weapon pivots' own `Animator`s
+(`firingAnimator.SetTrigger` on every shot) play from the shot: "Sword Swing" thrusts the right
+grip 0.53 forward and back and turns the blade, "Shuriken Throw" and "Spear Throw" move the grips
+(`unity_data::anim::TransformClip`, applied below the weapon pivot after the aim and before the
+hand IK; the launch point, and so the sword's swish, rides on the grip). TODO(UNCERTAIN): the
+pivots' controllers were not exported, so each clip is bound to its weapon by name and played
+once per shot. A projectile meeting the swish's body (not its `DontExplodeOnCollisionWithMe`
+deflector) explodes there, so struck bullets drift in mid-air as in the original screenshots.
+Moon's lunar module: a wheel-less `Car` driven by `RocketControl` (W throttle `Clamp01`, mass ×
+20 along its up axis from the "Rocket" engine; A/D move the spin towards ∓60°/s at 135°/s²), its
+`Health` inert (nothing explodes it), three `PassengerControl` seats taken once the pilot's is
+(each leaves on its own E); pilot and passengers all count for `TriggeredByAllPlayers`, so flying
+everyone up to the command module's marker ends the level. Not yet: its exhaust particles and
+engine sound, `GroundRaycastCameraInfluencer`, and `Dock` (the docking pull after the end).
+Level pass, Pirates first (2026-11-01, later): the deck cannon (`crate::cannon`: `CannonControl`
+on a non-exclusive slot with `IdleControllingCharacter`: E takes it while the character stays,
+crouched with idle input; the mouse aims the "Pivot", the left button fires its 0.7 s
+fully-automatic cannonball launcher with the operator's team and credit, `CannonColor` tints the
+barrel with the operator's body colour; E lets go); whales are never a safe respawn place
+(TODO(UNCERTAIN): the original records them like any ground, which respawned players over the
+sunk whale into the sea again and again; the likely cause of the camera "floating away");
+the "Enter Vehicle" control prompt ("Use [E]" / the gamepad's, `ControlPrompt` under
+`Input/Non-Touch Control Prompts`, laid out by `LayoutControls`) shows while a vehicle or the
+cannon can be entered; the Spear's `AimVisualizer` draws the charged throw's dashed arc (kept up
+to `MaximumDifficultyLevelComponents`' difficulty 0, TODO(UNCERTAIN): that script is not in the
+decompiled source); a car's driver (or passenger) has the car's health on the HUD bar; the game
+writes `SEU2_log.txt` next to itself even when started without the launcher.
+Skyline / Skyline 2 gunner seats: each player-helicopter gun with its own `ControlSlot`
+(`HelicopterGunnerControl`) is a seat further players board with E / A once the pilot's seat is
+taken (`CanControl`); the gunner aims and fires that gun (their own team and score credit), their
+`VehicleOccupant` shows them in their colours, E / A leaves (`controllerJustSet` latch), the
+explosion ejects everyone, and `MoveToOtherControlSlotIfAvailable` moves a gunner into the pilot's
+seat when it is free. Vehicle triggers (level enders, `TimeLimit`) count pilot, gunners, driver
+and passengers. TODO(UNCERTAIN): gunners use the helicopter role's processor selection (the
+`HelicopterGunnerInput` processors read the same buttons) and get out at the helicopter's
+disembarkment point.
+Office `DestroyAllForGoal`: in a one-player game, breaking all 15 equipment props gives the
+"office all destroyed" achievement ("Break room"). The "Complete" ending scene now loads after the
+last campaign level (offline, in a network game through the host, and from the credits'
+`ShowEndingCheat`) as an ordinary level: its cannons, texts and spawn points; `HidePlayerInfo`
+switches the HUD's `Player Info` off; `NextGoalPrompt` picks its text (all achievements done /
+Expert at difficulty ≥ 1 / the achievements hint) and fades in after 5 s over 5 s.
+Moon vehicles: the rover's gunner seat (`CarGunnerControl`): a second player boards the
+"Gunner" once the rover has a driver, sits holding the Rocket Launcher (`SetUpNewWeapon` on the
+occupant, arms on the grips), aims it all the way round (`CorrectAndSetAim(faceRight,
+canAimBackwards)`) and fires it with their own team and credit; E / A or the explosion gets them
+out; vehicle triggers count them. The rover's engine loop (`CarControl`: volume 1 while driven,
+pitch 0.48 + 0.17 |speed|) and the lunar module's (volume = throttle) play through the vehicle
+engine voices; the lunar module's "Emissions" particles (`engineParticles.emissionRate =
+throttle × engineParticleRate`) leave the engine turned with it. The rover's flip goals
+("rover 720", "rover 1440") are awarded on landing. Particle cones now spread by their angle
+(they all left straight along +z before; TODO(UNCERTAIN) Unity's exact distribution).
+`Pointer` (off-screen pointers) is dead code in the original: `SetScreenPosition` has no caller.
+From the scripts the user supplied (missing from the decompiled source):
+* Camera parent: `CameraPositioner` writes `localPosition`, and in Corruption 2, Moon, Moon Race,
+  Pirates and Treetops the camera sits under "Camera Offset" at y 6 / 6 / 6 / 5 / 3: the framed
+  centre is now raised by it (the rig works in local space, `CameraRig::parent_offset`). Before,
+  these levels were framed that much too low.
+* `CameraOffsetXChanger` (Pirates, x 253 → 13, x 450 → 0): the same changer choice as the
+  distance changers; "Camera Offset" `SmoothDamp`s its x (0.2 s), taking the camera along.
+* `GroundRaycastCameraInfluencer` (lunar module, while flown): a downward ray from the root on
+  layer 0 adds its hit point as a camera influence.
+* `ColorCycler` (Corruption 2's "Big Bad"): body colour round the hue circle every 10 s at value
+  1 (0.5 for the flash time after each hit), helmet × 0.898.
+* `RandomizeChildPositions` (Corruption 2's apartment "Rest" blocks): children swap local
+  positions on load, randomly per load (the original seeds from the clock too).
+* `TileChild` is an editor-time tool (no runtime caller; the scene already holds its
+  `Tile(Clone)` copies); `LocallyDeactivateOffscreen` (Treetops' background tiles, radius 50)
+  and `DetachChildWhenDisabled` only cull what is off screen, which the renderer's view test
+  already does: nothing observable to port.
+Still missing per level (script inventory): Moon's `Dock`.
+Reference screenshots of the original (Pirates, Moon, Skyline, Japan, Lobby) are in
+`HD GAME SCREENSHOTS/` next to `HD GAME REF/`.
+
+
+- Effects: `SpawnLocallyOnExplode` prefabs other than particle effects; `ColorCycler` (source missing); `Dock` (Moon's end, with the lunar module).
+- HUD: control prompts other than "Enter Vehicle".
+- Lobby: touch input; `RemoteLevelAvailability` (levels another machine has unlocked); original Level Loading scene; achievement triggers outside level end (`four frag shot`, `0 shot perfect health …`).
+- Level flow: server/client menus; `TimeLimit` finishers are host-only in a network game.
+- Vehicles: the lunar module's `Dock`; `VehicleOccupantIK`'s head look-at on gunners; cars (`CarControl`, `WheelJoint2D`), rockets (`RocketControl`), cannons (`CannonControl`) — the contact solver exists now; cars still need Box2D's wheel joint; the "Enter Vehicle" control prompt.
+- Weapons: verify Shuriken, Pistol and Spear end to end in Japan / Pirates / Treetops.
 - Enemies: cannons; moving platforms.
 - Audio: stereo panning.
 - Networking: transport is TCP on the LAN and iroh QUIC on the internet, not RakNet (the original cannot join); cheats from the launcher also act on other machines' avatars in a network game; breakable scenery and letters are simulated per machine; helicopter hulls follow their owner by a simple pull (no `SynchronizeRigidBody2D` extrapolation); projectiles are simulated by every machine from the shared input (only the host's hit); not yet tried between two machines.

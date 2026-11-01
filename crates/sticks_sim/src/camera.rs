@@ -25,7 +25,15 @@ pub struct CameraRig {
     pub settings: PositionerSettings,
     /// Vertical field of view in degrees (`Camera.fieldOfView`).
     pub field_of_view: f32,
+    /// World position of the camera (its parent's position plus `CameraPositioner`'s
+    /// `localPosition`).
     pub position: CameraPosition,
+    /// The camera's parent ("Camera Offset" in Corruption 2, Moon, Pirates and Treetops) on the
+    /// x/y plane: `CameraPositioner` works in `localPosition`, so the framed centre is offset by
+    /// it in the world. Zero for a camera at the scene root.
+    pub parent_offset: Vec2,
+    /// `CameraOffsetXChanger.velocity` (its `SmoothDamp` of the parent's x).
+    parent_velocity_x: f32,
     velocity: Vec2,
     velocity_z: f32,
     influencers: Vec<[f32; 2]>,
@@ -38,11 +46,27 @@ impl CameraRig {
             settings,
             field_of_view,
             position,
+            parent_offset: Vec2::ZERO,
+            parent_velocity_x: 0.0,
             velocity: Vec2::ZERO,
             velocity_z: 0.0,
             influencers: Vec::with_capacity(4),
             distance_only_influencers: Vec::with_capacity(4),
         }
+    }
+
+    /// A camera under a parent at `offset` (world `position` stays as given).
+    pub fn with_parent_offset(mut self, offset: Vec2) -> CameraRig {
+        self.parent_offset = offset;
+        self
+    }
+
+    /// `CameraOffsetXChanger.Apply`: the parent's x `SmoothDamp`s to `target` (0.2 s), carrying
+    /// the camera along.
+    pub fn move_parent_x(&mut self, target: f32, delta_time: f32) {
+        let x = smooth_damp(self.parent_offset.x, target, &mut self.parent_velocity_x, SMOOTH_TIME, f32::INFINITY, delta_time);
+        self.position.x += x - self.parent_offset.x;
+        self.parent_offset.x = x;
     }
 
     /// `CameraPositioner.AddInfluence`: the point must stay on screen this frame.
@@ -65,8 +89,10 @@ impl CameraRig {
         // Unity `Bounds`: centre + size, grown with `Encapsulate`.
         let (mut min, mut max);
         let mut center;
+        let offset = self.parent_offset;
+        let local = Vec2::new(self.position.x - offset.x, self.position.y - offset.y);
         if self.influencers.is_empty() {
-            center = Vec2::new(self.position.x, self.position.y);
+            center = local;
             (min, max) = (center, center);
         } else {
             let first = self.influencers[0];
@@ -103,10 +129,11 @@ impl CameraRig {
         center.y = (s.lowest_on_screen_y + half_visible_height).max(center.y);
         let target_z = -distance;
 
-        let current = Vec2::new(self.position.x, self.position.y);
-        let smoothed = smooth_damp_vec2(current, center, &mut self.velocity, SMOOTH_TIME, f32::INFINITY, delta_time);
+        // `transform.localPosition = SmoothDamp(localPosition, center)`: the world influences are
+        // taken as local coordinates, so the parent's offset adds on top.
+        let smoothed = smooth_damp_vec2(local, center, &mut self.velocity, SMOOTH_TIME, f32::INFINITY, delta_time);
         let z = smooth_damp(self.position.z, target_z, &mut self.velocity_z, s.smooth_time_z, f32::INFINITY, delta_time);
-        self.position = CameraPosition { x: smoothed.x, y: smoothed.y, z };
+        self.position = CameraPosition { x: smoothed.x + offset.x, y: smoothed.y + offset.y, z };
     }
 
     /// `LocalOffScreenReactivator.CameraBounds`: what the camera sees of the z = 0 plane
@@ -286,5 +313,22 @@ mod tests {
         let tan = (30.0f32).to_radians().tan();
         let expected = ((80.0 + 18.0) * 0.5 / (tan * ASPECT)).clamp(16.0, 75.0);
         assert!((c.position.z + expected).abs() < 1e-2);
+    }
+
+    #[test]
+    fn a_parent_offset_lifts_the_framed_centre() {
+        let mut plain = rig();
+        let mut offset = rig().with_parent_offset(Vec2::new(0.0, 5.0));
+        offset.position.y += 5.0;
+        for _ in 0..600 {
+            plain.add_influence(Vec2::new(10.0, 20.0));
+            offset.add_influence(Vec2::new(10.0, 20.0));
+            plain.late_update(16.0 / 9.0, 1.0 / 60.0);
+            offset.late_update(16.0 / 9.0, 1.0 / 60.0);
+        }
+        assert!((offset.position.y - plain.position.y - 5.0).abs() < 1e-3, "{:?} vs {:?}", offset.position, plain.position);
+        assert!((offset.position.x - plain.position.x).abs() < 1e-3);
+        offset.move_parent_x(13.0, 10.0);
+        assert!(offset.parent_offset.x > 12.0 && offset.position.x > plain.position.x + 12.0);
     }
 }

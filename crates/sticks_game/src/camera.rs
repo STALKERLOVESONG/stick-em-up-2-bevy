@@ -40,7 +40,7 @@ pub struct CameraPlugin;
 impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(OnEnter(AppState::InGame), spawn_camera)
-            .add_systems(Update, (change_minimum_distance, camera_late_update).chain().in_set(FrameSet::Camera))
+            .add_systems(Update, (change_minimum_distance, change_camera_offset, camera_late_update).chain().in_set(FrameSet::Camera))
             .add_systems(Update, sync_camera_transform.in_set(FrameSet::Present));
     }
 }
@@ -54,7 +54,9 @@ fn spawn_camera(mut commands: Commands, level: Res<ActiveLevel>) {
     let [r, g, b, _] = setup.background;
     commands.insert_resource(ClearColor(Color::srgb(r, g, b)));
     let settings = setup.positioner.clone().unwrap_or_else(PositionerSettings::default);
-    let rig = CameraRig::new(settings, setup.field_of_view, CameraPosition { x, y, z });
+    // `CameraPositioner` moves the camera's `localPosition`; under a "Camera Offset" parent the
+    // framed centre sits that far up (and across) in the world.
+    let rig = CameraRig::new(settings, setup.field_of_view, CameraPosition { x, y, z }).with_parent_offset(SimVec2::new(setup.parent_offset[0], setup.parent_offset[1]));
     commands.spawn((
         LevelCamera,
         Rig(rig),
@@ -83,6 +85,7 @@ fn camera_late_update(
     mut avatars: Query<(&Avatar, &Mortal, &mut CameraPlaceholder), Without<Enemy>>,
     helicopters: Query<&crate::helicopter::Helicopter>,
     cars: Query<&crate::cars::Car>,
+    collision: Option<Res<crate::level::Collision>>,
     mut rigs: Query<&mut Rig>,
 ) {
     let aspect = windows.single().map_or(16.0 / 9.0, |w| w.width() / w.height());
@@ -118,6 +121,12 @@ fn camera_late_update(
             }
             if let Some(p) = car.path_influence() {
                 rig.add_distance_only_influence(p);
+            }
+            // `GroundRaycastCameraInfluencer` (the lunar module, while flown): the ground under it.
+            if let Some(collision) = collision.as_ref() {
+                if let Some(p) = car.ground_influence(&collision.world, collision.rules.raycasts_hit_triggers) {
+                    rig.add_influence(p);
+                }
             }
         }
         rig.late_update(aspect, delta);
@@ -167,6 +176,50 @@ fn change_minimum_distance(
         }
     }
     rig.settings.minimum_distance = chosen.unwrap_or(*default);
+}
+
+/// `Changer<CameraOffsetXChanger>.Update` (Pirates): the same choice of changer as
+/// [`change_minimum_distance`] (its own list, never disabled by `EndOfLevelCameraMover`); the
+/// chosen one's `offsetX`, or the parent's starting x, is where "Camera Offset" `SmoothDamp`s to.
+fn change_camera_offset(
+    clock: Res<FrameClock>,
+    level: Res<crate::level::ActiveLevel>,
+    avatars: Query<(&Avatar, &Mortal), With<crate::player::ControlledBy>>,
+    helicopters: Query<&crate::helicopter::Helicopter>,
+    cars: Query<&crate::cars::Car>,
+    mut rigs: Query<&mut Rig, With<LevelCamera>>,
+    mut state: Local<Option<(String, f32, Vec<bool>)>>,
+) {
+    let changers = &level.0.offset_changers;
+    if changers.is_empty() {
+        return;
+    }
+    let Ok(mut rig) = rigs.single_mut() else { return };
+    if state.as_ref().is_none_or(|(name, _, _)| *name != level.0.name) {
+        *state = Some((level.0.name.clone(), rig.parent_offset.x, vec![false; changers.len()]));
+    }
+    let Some((_, default, passed)) = state.as_mut() else { return };
+    // `Player.Controlling`: the player's own `Man`, or the vehicle it controls.
+    let xs: Vec<f32> = avatars
+        .iter()
+        .filter(|(_, m)| m.avatar_active())
+        .map(|(a, _)| a.position().x)
+        .chain(helicopters.iter().filter(|h| h.pilot().is_some()).map(|h| h.body.position.x))
+        .chain(cars.iter().filter(|c| c.driver().is_some()).map(|c| c.position().x))
+        .collect();
+    let mut chosen = None;
+    for (i, &(x, offset)) in changers.iter().enumerate() {
+        let ahead = xs.iter().any(|&p| p > x);
+        let all_behind = !xs.iter().any(|&p| p > x - 10.0);
+        if ahead || (passed[i] && !all_behind) {
+            chosen = Some(offset);
+            passed[i] = true;
+        } else {
+            passed[i] = false;
+        }
+    }
+    let delta = clock.stepper.frame().delta;
+    rig.move_parent_x(chosen.unwrap_or(*default), delta);
 }
 
 fn sync_camera_transform(mut cameras: Query<(&Rig, &mut Transform), With<LevelCamera>>) {

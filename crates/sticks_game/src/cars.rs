@@ -15,7 +15,12 @@
 //! TODO(UNCERTAIN): cars do not collide with each other or with helicopters; the wheels'
 //! `PhysicsMaterial2D` is not read (default friction 0.4); a `CopyLocalTransform` sprite is
 //! matched to the wheel it started on.
-//! TODO: the gunner seat (`CarGunnerControl`), the "rover 720/1440" goals
+//! The lunar module (Moon) is a car without wheels driven by `RocketControl` (thrust along its up
+//! axis from the engine, A/D steer its spin), with three `PassengerControl` seats other players
+//! can take once someone pilots it.
+//!
+//! TODO: the lunar module's exhaust particles, engine sound and `GroundRaycastCameraInfluencer`;
+//! `Dock` at Moon's end (the module pulled onto the command module); the gunner seat (`CarGunnerControl`), the "rover 720/1440" goals
 //! ([`sticks_sim::car::FlipGoal`] is computed, not recorded), the engine sound, enemies targeting
 //! cars.
 
@@ -32,6 +37,7 @@ use sticks_sim::life::Health;
 use sticks_sim::physics::{BodyShape, StaticCollider, merge_convex, triangulate};
 use sticks_sim::rigid_body::RigidBody;
 use sticks_sim::vehicles::{ControlSlot, ExitLatch, team_vehicles_layer};
+use sticks_sim::weapons::{Launcher, Shot, corrected_aim_with, difficulty_modified};
 use unity_compat::{Quat as SimQuat, Vec2 as SimVec2, Vec3 as SimVec3};
 use unity_data::math::Affine;
 use unity_data::sprites::{SpriteDef, SpriteLibrary, TiledLayout};
@@ -42,9 +48,11 @@ use crate::config::GameConfig;
 use crate::effects::PlaySound;
 use crate::figure::{ManArt, Palette};
 use crate::level::{ActiveLevel, CharacterAnimation, Collision};
+use crate::helicopter::HeliAim;
 use crate::vehicles::Piloting;
-use crate::player::FrameClock;
-use crate::state::AppState;
+use crate::player::{ControlledBy, FrameClock};
+use crate::state::{AppState, GameMode, Session};
+use crate::weapon::{Projectile, ProjectileLibrary};
 use crate::unity_render::{FrameQueue, QueueSet, SceneLight, TextureLoad, UnityLitMaterial, UnityTextures, camera_view};
 
 /// Collider ids of car hulls published as moving obstacles (after the helicopters').
@@ -77,6 +85,13 @@ pub struct Car {
     joints: Vec<WheelJoint>,
     warm: WarmStart,
     drive: CarDrive,
+    /// `RocketControl` (the lunar module) instead of `CarControl`, with the engine's position in
+    /// the body's frame.
+    rocket: Option<(sticks_sim::car::RocketDrive, SimVec2)>,
+    /// `PassengerControl` seats (the lunar module's), each its own `ControlSlot`.
+    pub(crate) passengers: Vec<Passenger>,
+    /// `CarGunnerControl` seats (the rover's gunner), index-matched with `spec.gunners`.
+    pub(crate) gunners: Vec<CarGunnerSeat>,
     pub(crate) slot: Option<ControlSlot<Entity>>,
     pub(crate) exit_latch: ExitLatch,
     /// `CarInput.Exit` of the driver this frame.
@@ -102,9 +117,77 @@ pub struct Car {
     hull: Vec<Vec<SimVec2>>,
     explode_pending: bool,
     explosion: Option<(sticks_sim::explosion::Explosion, sticks_sim::visual::VisualArt)>,
+    /// `RocketControl.engineParticles` (the lunar module's "Emissions").
+    exhaust: Option<Exhaust>,
+    /// `engineSound.volume`: the scene's, 1 from `SetController`, 0 from `ClearController`
+    /// (`RocketControl` sets the throttle every frame instead).
+    engine_volume: f32,
+}
+
+/// A rocket's engine particles: `emissionRate = desiredSpeedControl × engineParticleRate`.
+struct Exhaust {
+    node: usize,
+    spec: unity_data::particles::ParticleEffectSpec,
+    system: sticks_sim::particles::ParticleSystem,
+}
+
+/// A passenger seat: who sits in it and their exit input.
+pub(crate) struct Passenger {
+    pub(crate) slot: ControlSlot<Entity>,
+    pub(crate) exit_latch: ExitLatch,
+    /// `PassengerInput.Exit` of the passenger this frame.
+    pub(crate) exit: bool,
+}
+
+/// A `CarGunnerControl` seat: who sits in it, their `HelicopterGunnerInput` this frame and the
+/// occupant's weapon.
+pub(crate) struct CarGunnerSeat {
+    pub(crate) slot: ControlSlot<Entity>,
+    pub(crate) exit_latch: ExitLatch,
+    pub(crate) exit: bool,
+    pub(crate) fire: bool,
+    pub(crate) aim: Option<HeliAim>,
+    /// The gunner's team (their shots' layer).
+    team: u8,
+    /// `correctedAim` (starts at (1, 0)).
+    corrected: SimVec2,
+    /// The rig weapon `SetUpNewWeapon(weaponName)` put on the occupant and its
+    /// `ProjectileLauncher`, set up on the first `Update` (as the original does lazily).
+    weapon: Option<(usize, Launcher)>,
+}
+
+impl CarGunnerSeat {
+    pub(crate) fn gunner(&self) -> Option<Entity> {
+        self.slot.controller()
+    }
 }
 
 impl Car {
+    /// `CarGunnerControl.SetController`.
+    pub(crate) fn take_gun(&mut self, g: usize, player: Entity, team: u8) {
+        let Some(seat) = self.gunners.get_mut(g) else { return };
+        seat.slot.set_controller(player);
+        seat.exit_latch.on_set_controller();
+        seat.team = team;
+        seat.fire = false;
+        seat.exit = false;
+    }
+
+    /// `CarGunnerControl.ClearController`: the launcher loses its input.
+    pub(crate) fn leave_gun(&mut self, g: usize) -> Option<Entity> {
+        let seat = self.gunners.get_mut(g)?;
+        seat.fire = false;
+        seat.exit = false;
+        seat.aim = None;
+        seat.slot.clear_controller()
+    }
+
+    /// Where gun seat `g`'s `ControlSlot` is (on the "Gunner" occupant).
+    pub(crate) fn gunner_position(&self, g: usize) -> SimVec3 {
+        let p = self.node_world(self.spec.gunners[g].seat.node, &self.root_affine()).t;
+        SimVec3::new(p[0], p[1], p[2])
+    }
+
     fn root_affine(&self) -> Affine {
         let b = &self.bodies[0].body;
         let q = SimQuat::about_z(b.angle);
@@ -152,16 +235,41 @@ impl Car {
         SimVec3::new(p.x, p.y, self.root_z)
     }
 
+    /// Where its `Targetable` ("Target") is, while projectiles can hit it.
+    pub fn target_position(&self) -> Option<SimVec2> {
+        let node = self.spec.target?;
+        if !self.is_target() {
+            return None;
+        }
+        let p = self.node_world(node, &self.root_affine()).t;
+        Some(SimVec2::new(p[0], p[1]))
+    }
+
     pub fn disembarkment_point(&self) -> Option<SimVec3> {
         let node = self.spec.disembarkment_point?;
         let p = self.node_world(node, &self.root_affine()).t;
         Some(SimVec3::new(p[0], p[1], p[2]))
     }
 
+    /// The engine `AudioSource` while the car is in one piece: its settings, position, volume and
+    /// pitch (`CarControl.FixedUpdate`: `0.48 + 0.17 |desiredSpeed|`; the rocket keeps its pitch).
+    pub fn engine(&self) -> Option<(&unity_data::vehicles::LoopingSound, SimVec3, f32, f32)> {
+        let sound = self.spec.engine_sound.as_ref()?;
+        if !self.is_target() {
+            return None;
+        }
+        let (volume, pitch) = match &self.rocket {
+            Some((rocket, _)) => (rocket.engine_volume(), sound.pitch),
+            None => (self.engine_volume, self.drive.engine_pitch()),
+        };
+        Some((sound, self.slot_position(), volume, pitch))
+    }
+
     /// `CarControl.SetController`.
     pub(crate) fn take_control(&mut self, player: Entity, team: u8) {
         let Some(slot) = self.slot.as_mut() else { return };
         slot.set_controller(player);
+        self.engine_volume = 1.0;
         self.exit_latch.on_set_controller();
         self.layer = self.layer_unoccupied;
         self.layer_to_set = Some(team_vehicles_layer(team));
@@ -171,8 +279,12 @@ impl Car {
     pub(crate) fn relinquish(&mut self) -> Option<Entity> {
         let player = self.slot.as_mut()?.clear_controller();
         self.drive.clear();
+        if let Some((rocket, _)) = &mut self.rocket {
+            rocket.clear();
+        }
         self.input = (0.0, 0.0);
         self.exit = false;
+        self.engine_volume = 0.0;
         self.layer = self.layer_unoccupied;
         self.layer_to_set = None;
         player
@@ -181,6 +293,16 @@ impl Car {
     /// The "Camera Influencer" while driven (`LinkBehaviourEnablementToControlSlotControlledness`).
     pub fn camera_influence(&self) -> Option<SimVec2> {
         (self.driver().is_some() && self.alive()).then(|| self.position() + self.camera_offset.unwrap_or(SimVec2::ZERO))
+    }
+
+    /// `GroundRaycastCameraInfluencer` on a rocket's root (enabled while it has a pilot,
+    /// `LinkBehaviourEnablementToControlSlotControlledness`): where a ray straight down from the
+    /// root first meets layer 0.
+    pub fn ground_influence(&self, world: &sticks_sim::physics::World, hit_triggers: bool) -> Option<SimVec2> {
+        if self.rocket.is_none() || !self.spec.ground_raycast_camera || self.driver().is_none() || !self.alive() {
+            return None;
+        }
+        world.raycast_down_point(self.position(), 1, hit_triggers)
     }
 
     /// `Rigidbody2DPathCameraInfluencer` while driven.
@@ -239,8 +361,10 @@ impl Plugin for CarPlugin {
                     drive_cars.in_set(crate::FrameSet::FixedSteps).after(crate::player::run_fixed_steps).before(crate::weapon::step_projectiles),
                     hit_cars.in_set(crate::FrameSet::FixedSteps).after(crate::weapon::step_projectiles),
                     explode_cars.in_set(crate::FrameSet::Characters),
+                    operate_car_gunners.in_set(crate::FrameSet::Characters).run_if(in_state(AppState::InGame)),
                 ),
             )
+            .add_systems(Update, run_exhausts.in_set(crate::FrameSet::Present).before(QueueSet::Collect).run_if(in_state(AppState::InGame)))
             .add_systems(Update, queue_cars.in_set(QueueSet::Collect).run_if(in_state(AppState::InGame)));
     }
 }
@@ -327,6 +451,20 @@ fn spawn_cars(
         let radii: Vec<f32> = spec.wheels.iter().map(|w| w.radius).collect();
         let mut car = Car {
             drive: CarDrive::new(spec.tuning, &radii),
+            rocket: spec.rocket.map(|tuning| {
+                // The engine in the body's frame (the root's own rotation undone).
+                let engine = tuning.engine.map_or(SimVec2::ZERO, |e| {
+                    let local = root.inverse().transform_point(spec.world_of_node(e, &root).t);
+                    SimVec2::new(local[0] * root_scale[0], local[1] * root_scale[1])
+                });
+                (sticks_sim::car::RocketDrive::new(tuning), engine)
+            }),
+            passengers: spec.passengers.iter().map(|_| Passenger { slot: ControlSlot::new(spec.control_radius), exit_latch: ExitLatch::default(), exit: false }).collect(),
+            gunners: spec
+                .gunners
+                .iter()
+                .map(|g| CarGunnerSeat { slot: ControlSlot::new(g.control_radius), exit_latch: ExitLatch::default(), exit: false, fire: false, aim: None, team: 0, corrected: SimVec2::new(1.0, 0.0), weapon: None })
+                .collect(),
             wheels_grounded: vec![false; spec.wheels.len()],
             bodies,
             joints,
@@ -350,17 +488,25 @@ fn spawn_cars(
             hull,
             explode_pending: false,
             explosion: None,
+            engine_volume: spec.engine_sound.as_ref().map_or(0.0, |e| e.volume),
+            exhaust: spec.exhaust.as_ref().map(|(node, fx)| Exhaust { node: *node, spec: fx.clone(), system: sticks_sim::particles::ParticleSystem::play() }),
             spec,
         };
         car.rebuild_shape();
-        info!("car {} with {} wheels", car.spec.name, car.spec.wheels.len());
+        info!("car {} with {} wheels{}", car.spec.name, car.spec.wheels.len(), if car.rocket.is_some() { " (rocket)" } else { "" });
         commands.spawn((Name::new(car.spec.name.clone()), car));
     }
 }
 
 /// `CarControl.FixedUpdate` and the physics step of every car, per fixed step; then the layer
 /// switch (`layerToSet` once no other car is within 10 units) and the path influencer.
-fn drive_cars(clock: Res<FrameClock>, collision: Res<Collision>, mut cars: Query<&mut Car>) {
+fn drive_cars(
+    clock: Res<FrameClock>,
+    collision: Res<Collision>,
+    mut cars: Query<&mut Car>,
+    mut memory: ResMut<crate::lobby::LobbyMemory>,
+    players: Query<&crate::player::Player>,
+) {
     let rules = &collision.rules;
     for &dt in &clock.steps {
         for mut car in &mut cars {
@@ -369,7 +515,24 @@ fn drive_cars(clock: Res<FrameClock>, collision: Res<Collision>, mut cars: Query
             }
             let car = &mut *car;
             let input = car.driver().map(|_| car.input);
-            let _goal = car.drive.fixed_update(&mut car.bodies, &car.wheels_grounded, car.body_touching, input, dt);
+            match &mut car.rocket {
+                Some((rocket, engine)) => rocket.fixed_update(&mut car.bodies[0].body, *engine, input, dt),
+                None => {
+                    // The flip goals: "rover 720" for two flips, also "rover 1440" for four.
+                    let goal = car.drive.fixed_update(&mut car.bodies, &car.wheels_grounded, car.body_touching, input, dt);
+                    if let (Some(goal), Some(player)) = (goal, car.driver().and_then(|d| players.get(d).ok())) {
+                        let id = sticks_sim::level_end::PlayerId::anonymous_local(player.index);
+                        let mut changed = memory.goals.goal_done(&id, "rover 720", None);
+                        if goal == sticks_sim::car::FlipGoal::FourFlips {
+                            changed |= memory.goals.goal_done(&id, "rover 1440", None);
+                        }
+                        info!("{}: {:?}", car.spec.name, goal);
+                        if changed {
+                            memory.save.goals = true;
+                        }
+                    }
+                }
+            }
             let touches = step_with_joints(&mut car.bodies, &mut car.joints, &collision.world, rules, dt, rules.velocity_iterations, rules.position_iterations, &mut car.warm);
             let n = car.wheels_grounded.len();
             for i in 0..n {
@@ -377,8 +540,8 @@ fn drive_cars(clock: Res<FrameClock>, collision: Res<Collision>, mut cars: Query
             }
             car.body_touching = touches.iter().any(|t| matches!(t, Touch::Static { body: 0, .. }));
             // `Rigidbody2DPathCameraInfluencer.FixedUpdate`: a quarter-second ballistic path
-            // for up to five seconds; the first linecast hit on layer 0.
-            if car.driver().is_some() {
+            // for up to five seconds; the first linecast hit on layer 0 (the rovers only).
+            if car.driver().is_some() && car.rocket.is_none() {
                 let b = car.bodies[0].body;
                 let gravity = rules.gravity * b.gravity_scale;
                 let (mut p, mut v) = (b.position, b.linear_velocity);
@@ -440,6 +603,10 @@ fn hit_cars(mut hits: MessageReader<CarHit>, mut cars: Query<&mut Car>) {
     for hit in hits.read() {
         let Ok(mut car) = cars.get_mut(hit.car) else { continue };
         if !car.alive() {
+            continue;
+        }
+        // The lunar module has a `Health` nothing acts on.
+        if !car.spec.explodes {
             continue;
         }
         car.health.damage(hit.amount);
@@ -552,7 +719,7 @@ fn queue_cars(
     art: Option<Res<ManArt>>,
     animation: Option<Res<CharacterAnimation>>,
     cars: Query<(Entity, &Car)>,
-    pilots: Query<(&Piloting, Option<&Palette>), With<Disabled>>,
+    pilots: Query<(&Piloting, &ControlledBy, Option<&Palette>), With<Disabled>>,
     mut queue: ResMut<FrameQueue>,
 ) {
     let Ok(rig) = rigs.single() else { return };
@@ -582,14 +749,38 @@ fn queue_cars(
                 renderers.push((*texture, sprite_shadow_geometry(def, s.tiled.as_ref(), &world, rotation, s.scale, s.color[3], *plane, light)));
             }
         }
+        // `ParticleSystemLines` of the rocket's exhaust.
+        if let (Some(ex), Some(art)) = (&car.exhaust, art.as_ref()) {
+            if let Some(lines) = &ex.spec.lines {
+                let w = car.node_world(ex.node, &root).t;
+                let drawing = ex.system.drawing(&ex.spec.system, lines, ex.spec.rotation_follows_velocity, SimVec3::new(w[0], w[1], w[2]), light);
+                for g in drawing.geometry(art.art.line_uvs()) {
+                    renderers.push((art.texture, g));
+                }
+            }
+        }
         // `CarControl.SetController` → `driver.enabled`: the driver sits in the seat in the
         // player's colours while somebody drives.
-        if let (Some(seat), Some(_), Some(art), Some(animation)) = (&car.spec.driver, car.driver(), art.as_ref(), animation.as_ref()) {
+        let palette_of = |player: Entity| pilots.iter().find(|(p, c, _)| p.vehicle == entity && c.0 == player).and_then(|(_, _, p)| p.map(|p| p.0));
+        if let (Some(seat), Some(driver), Some(art), Some(animation)) = (&car.spec.driver, car.driver(), art.as_ref(), animation.as_ref()) {
             if car.active_in_hierarchy(seat.node) {
-                let palette = pilots.iter().find(|(p, _)| p.vehicle == entity).and_then(|(_, p)| p.map(|p| p.0)).unwrap_or_else(|| art.prefab_palette());
                 let world = car.node_world(seat.node, &root);
                 let at = SimVec3::new(world.t[0], world.t[1], world.t[2]);
-                renderers.extend(art.occupant_renderers(&animation.0, &seat.animation_state, at, node_rotation(car, seat.node), palette, light));
+                renderers.extend(art.occupant_renderers(&animation.0, &seat.animation_state, at, node_rotation(car, seat.node), palette_of(driver).unwrap_or_else(|| art.prefab_palette()), light, None));
+            }
+        }
+        // `CarGunnerControl.SetController` → `gunner.enabled`: the gunner with the weapon aimed.
+        if let (Some(art), Some(animation)) = (art.as_ref(), animation.as_ref()) {
+            for (g, seat) in car.gunners.iter().enumerate() {
+                let (Some(gunner), Some((weapon, _))) = (seat.gunner(), seat.weapon.as_ref()) else { continue };
+                let spec = &car.spec.gunners[g].seat;
+                if !car.active_in_hierarchy(spec.node) {
+                    continue;
+                }
+                let world = car.node_world(spec.node, &root);
+                let at = SimVec3::new(world.t[0], world.t[1], world.t[2]);
+                let aimed = sticks_sim::aim::AimedWeapon { weapon: *weapon, aim: seat.corrected, face_right: true };
+                renderers.extend(art.occupant_renderers(&animation.0, &spec.animation_state, at, node_rotation(car, spec.node), palette_of(gunner).unwrap_or_else(|| art.prefab_palette()), light, Some(&aimed)));
             }
         }
         for (texture, g) in renderers {
@@ -597,5 +788,93 @@ fn queue_cars(
                 queue.0.push_frame(texture, g);
             }
         }
+    }
+}
+
+/// `CarGunnerControl.Update` and the occupant weapon's `ProjectileLauncher.Update`: the weapon
+/// pivot turns to `CorrectAndSetAim(RelativeAim(pivot), faceRight: true, canAimBackwards: true)`
+/// and fires along the relative aim from its launch point.
+#[allow(clippy::too_many_arguments)]
+fn operate_car_gunners(
+    mut commands: Commands,
+    clock: Res<FrameClock>,
+    session: Res<Session>,
+    collision: Res<Collision>,
+    art: Option<Res<ManArt>>,
+    animation: Option<Res<CharacterAnimation>>,
+    library: Option<Res<ProjectileLibrary>>,
+    mut cars: Query<&mut Car>,
+    mut sounds: MessageWriter<PlaySound>,
+) {
+    let (Some(art), Some(animation), Some(library)) = (art, animation, library) else { return };
+    let weapons = &art.model().rig().weapons;
+    let delta = clock.stepper.frame().delta;
+    for mut car in &mut cars {
+        if !car.is_target() {
+            continue;
+        }
+        let spec = car.spec.clone();
+        let root = car.root_affine();
+        for (g, gunner_spec) in spec.gunners.iter().enumerate() {
+            // `SetUpNewWeapon(GetWeaponPivots(occupant), weaponName, ...)` on the first `Update`.
+            if car.gunners[g].weapon.is_none() {
+                let Some(index) = weapons.iter().position(|w| w.name == gunner_spec.weapon) else { continue };
+                let w = &weapons[index];
+                let chargeable = library.0.get(&w.projectile).is_some_and(|p| p.chargeable);
+                car.gunners[g].weapon = Some((index, Launcher::new(w.firing_rate_time, w.fully_automatic, chargeable)));
+            }
+            let Some(responsible) = car.gunners[g].gunner() else { continue };
+            let Some(aim) = car.gunners[g].aim else { continue };
+            let Some(index) = car.gunners[g].weapon.as_ref().map(|(i, _)| *i) else { continue };
+            let weapon = &weapons[index];
+            let world = car.node_world(gunner_spec.seat.node, &root);
+            let at = SimVec3::new(world.t[0], world.t[1], world.t[2]);
+            let rotation = node_rotation(&car, gunner_spec.seat.node);
+            // The occupant is posed at the usual depth; its points move to the seat's z.
+            let dz = at.z - sticks_sim::character::DEFAULT_Z;
+            let previous = car.gunners[g].corrected;
+            let aimed = |aim: SimVec2| sticks_sim::aim::AimedWeapon { weapon: index, aim, face_right: true };
+            let Some(posed) = art.occupant_posed(&animation.0, &gunner_spec.seat.animation_state, at, rotation, Some(&aimed(previous))) else { continue };
+            let pivot = posed.world_position(weapon.bone);
+            let relative = aim.relative_to([pivot.x, pivot.y, pivot.z + dz]);
+            let corrected = corrected_aim_with(relative, previous, true, true);
+            car.gunners[g].corrected = corrected;
+            let fire = car.gunners[g].fire;
+            let Some((_, launcher)) = car.gunners[g].weapon.as_mut() else { continue };
+            let Some(launch) = launcher.update(fire, clock.time, delta) else { continue };
+            let (Some(projectile), Some(launch_point)) = (library.0.get(&weapon.projectile), weapon.launch_point) else { continue };
+            let Some(posed) = art.occupant_posed(&animation.0, &gunner_spec.seat.animation_state, at, rotation, Some(&aimed(corrected))) else { continue };
+            let muzzle = posed.world_position(launch_point);
+            let damage = match &projectile.damage_scaling {
+                Some(s) if session.mode == GameMode::Campaign => difficulty_modified(projectile.damage, &s.amount, s.affected_by_player_count, session.player_count as i32, session.difficulty),
+                _ => projectile.damage,
+            };
+            let team = car.gunners[g].team;
+            let shot = Shot::launch(projectile, damage, SimVec2::new(muzzle.x, muzzle.y), relative, launch.sub_frame_offset, team.into(), collision.rules.gravity);
+            commands.spawn((Name::new(projectile.name.clone()), Projectile::new(shot, projectile.clone(), Some(responsible))));
+            if !weapon.firing_sound.is_empty() {
+                sounds.write(PlaySound { group: weapon.firing_sound.clone(), at: Some(SimVec3::new(muzzle.x, muzzle.y, muzzle.z + dz)), owner: None });
+            }
+        }
+    }
+}
+
+/// `RocketControl.Update` (`engineParticles.emissionRate`) and the exhaust's simulation, after
+/// the frame's `LateUpdate` like the other particle systems.
+fn run_exhausts(clock: Res<FrameClock>, collision: Res<Collision>, mut rng: ResMut<crate::effects::ParticleRng>, mut cars: Query<&mut Car>) {
+    let delta = clock.stepper.frame().delta;
+    let gravity = collision.rules.gravity;
+    for mut car in &mut cars {
+        let car = &mut *car;
+        let (Some(node), Some((rocket, _))) = (car.exhaust.as_ref().map(|e| e.node), car.rocket.as_ref()) else { continue };
+        if !car.is_target() {
+            continue;
+        }
+        let rate = rocket.engine_volume() * rocket.tuning.engine_particle_rate;
+        let w = car.node_world(node, &car.root_affine()).t;
+        let rotation = node_rotation(car, node);
+        let Some(ex) = car.exhaust.as_mut() else { continue };
+        ex.spec.system.emission.rate = unity_data::particles::MinMaxCurve::constant(rate);
+        ex.system.update_oriented(&ex.spec.system, delta, SimVec3::new(w[0], w[1], w[2]), rotation, gravity, &mut rng.0);
     }
 }

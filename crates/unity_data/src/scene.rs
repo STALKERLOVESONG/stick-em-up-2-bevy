@@ -88,6 +88,18 @@ impl Scene {
         }
     }
 
+    /// `Transform.localPosition = value` on the parsed data (the serialized `{x, y, z}` map).
+    pub fn set_local_position(&mut self, go: FileId, value: Value) {
+        let Some(&t) = self.transform_of.get(&go) else { return };
+        let Some(doc) = self.docs.get_mut(&t) else { return };
+        if let Value::Map(entries) = &mut doc.body {
+            match entries.iter_mut().find(|(k, _)| k == "m_LocalPosition") {
+                Some(entry) => entry.1 = value,
+                None => entries.push(("m_LocalPosition".to_owned(), value)),
+            }
+        }
+    }
+
     fn transform_doc(&self, go: FileId) -> Option<&Document> {
         self.docs.get(self.transform_of.get(&go)?)
     }

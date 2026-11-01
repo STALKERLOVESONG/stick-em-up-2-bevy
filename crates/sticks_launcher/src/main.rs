@@ -255,7 +255,8 @@ impl Choices {
             Some((file.try_clone().ok()?, file))
         });
         if let Some((out, err)) = log {
-            command.stdout(out).stderr(err);
+            // The game does not start a logging copy of itself when its output is taken care of.
+            command.stdout(out).stderr(err).env("SEU2_LOGGING", "1");
         }
         command.spawn().map(|_| ()).map_err(|e| format!("The game did not start:\n{e}"))
     }

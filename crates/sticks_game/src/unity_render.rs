@@ -350,10 +350,13 @@ fn build_scenery(
             .and_then(|r| level.0.scrollers.iter().position(|sc| sc.object == r))
             .or_else(|| wave_of(s.object))
             .or_else(|| s.shadow_of.and_then(|(c, _)| level.0.sprites.get(c)).and_then(|c| wave_of(c.object)))
+            // Then the `Whale`s' sprites (`crate::scenery`).
+            .or_else(|| s.rigid_root.and_then(|r| level.0.whales.iter().position(|w| w.object == r)).map(|i| level.0.scrollers.len() + level.0.waves.len() + i))
     };
     let art = LevelArt::build_following(
         &level.0.sprites,
-        |s| s.rigid_root.is_some_and(|r| helicopter_roots.contains(&r)),
+        // The sprites turning with a cannon's pivot are drawn by `crate::cannon`.
+        |s| s.rigid_root.is_some_and(|r| helicopter_roots.contains(&r)) || level.0.cannons.iter().any(|c| c.parts.iter().any(|(o, _)| *o == s.object)),
         follow,
         |guid| libraries.get(guid).and_then(Option::as_ref),
         |path| textures.id(path, &mut load),

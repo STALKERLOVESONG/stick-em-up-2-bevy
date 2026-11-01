@@ -23,6 +23,12 @@ const SQR_AIMING_MIN_DISTANCE: f32 = 0.504_099_97;
 /// stretched to a minimum length (an empty aim keeps `previous`), and the weapon never points
 /// behind the facing direction.
 pub fn corrected_aim(aim: Vec2, previous: Vec2, face_right: bool) -> Vec2 {
+    corrected_aim_with(aim, previous, face_right, false)
+}
+
+/// [`corrected_aim`] with `canAimBackwards` (`CarGunnerControl` passes true: the gunner turns the
+/// weapon all the way round).
+pub fn corrected_aim_with(aim: Vec2, previous: Vec2, face_right: bool, can_aim_backwards: bool) -> Vec2 {
     let mut aim = aim;
     if aim.y > 0.0 {
         let angle = aim.x.atan2(aim.y);
@@ -39,7 +45,9 @@ pub fn corrected_aim(aim: Vec2, previous: Vec2, face_right: bool) -> Vec2 {
             aim = aim * (AIMING_MIN_DISTANCE / length);
         }
     }
-    aim.x = aim.x.abs() * if face_right { 1.0 } else { -1.0 };
+    if !can_aim_backwards {
+        aim.x = aim.x.abs() * if face_right { 1.0 } else { -1.0 };
+    }
     aim
 }
 
@@ -163,6 +171,11 @@ impl Launcher {
 
     pub fn new(firing_rate_time: f32, fully_automatic: bool, chargeable: bool) -> Launcher {
         Launcher { firing_rate_time, fully_automatic, chargeable, charge_time: 0.0, next_fire_time: 0.0, waiting_for_release: false }
+    }
+
+    /// `ProjectileLauncher.ChargeTime`: how long the trigger has been held (charged weapons).
+    pub fn charge_time(&self) -> f32 {
+        if self.chargeable && self.waiting_for_release { self.charge_time } else { 0.0 }
     }
 
     /// `ProjectileLauncher.OnRespawned`.
@@ -325,6 +338,16 @@ impl Shot {
     /// its team's projectile layer. `damage` is the (already difficulty-scaled) hit damage.
     pub fn launch(spec: &ProjectileSpec, damage: f32, origin: Vec2, fire_direction: Vec2, sub_frame_offset: f32, team: i32, gravity: Vec2) -> Shot {
         Shot::launch_charged(spec, damage, origin, fire_direction, sub_frame_offset, team, gravity, None)
+    }
+
+    /// A body launched without aiming (`StarShower`): spawned unrotated, `angular_velocity`
+    /// degrees per second.
+    pub fn unrotated_with_spin(mut self, angular_velocity: f32) -> Shot {
+        self.angle_degrees = 0.0;
+        self.rotation_degrees = 0.0;
+        self.rotation_at_last_update = 0.0;
+        self.angular_velocity = angular_velocity;
+        self
     }
 
     /// [`Shot::launch`] for a charged launch: `SetChargeTime(chargeTime)` reaches the prefab's
@@ -862,5 +885,69 @@ mod tests {
         assert!((shot.velocity.x - 25.0).abs() < 1e-4);
         let full = Shot::launch_charged(&spear, 1.0, Vec2::ZERO, Vec2::new(1.0, 0.0), 0.0, 0, Vec2::ZERO, Some(5.0));
         assert!((full.velocity.x - 40.0).abs() < 1e-4);
+    }
+}
+
+/// `AimVisualizer.Update`: the dashes of a charged throw's predicted arc, relative to the launch
+/// point `origin`: 0.03 s of flight drawn, 0.04 s skipped, for up to 2.5 s; a dash that meets
+/// the level (`hits`, a layer-0 linecast) ends there and the arc stops, as it does when a gap
+/// meets it.
+pub fn aim_arc(origin: Vec2, start_velocity: Vec2, gravity: Vec2, hits: impl Fn(Vec2, Vec2) -> bool) -> Vec<(Vec2, Vec2)> {
+    let at = |t: f32| start_velocity * t + gravity * (0.5 * t * t);
+    let mut dashes = Vec::new();
+    let mut from = Vec2::ZERO;
+    let mut t = 0.0f32;
+    while t < 2.5 {
+        let t_end = t + 0.03;
+        let mut to = at(t_end);
+        let hit = hits(origin + from, origin + to);
+        if hit {
+            // `RaycastHit2D.point`: where along the dash the level begins.
+            let (mut lo, mut hi) = (0.0f32, 1.0f32);
+            for _ in 0..12 {
+                let mid = (lo + hi) * 0.5;
+                if hits(origin + from, origin + from + (to - from) * mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            to = from + (to - from) * hi;
+        }
+        dashes.push((from, to));
+        if hit {
+            break;
+        }
+        let t_next = t_end + 0.04;
+        let next = at(t_next);
+        if hits(origin + to, origin + next) {
+            break;
+        }
+        t = t_next;
+        from = next;
+    }
+    dashes
+}
+
+#[cfg(test)]
+mod aim_arc_tests {
+    use super::*;
+
+    #[test]
+    fn the_arc_is_dashed_and_stops_at_the_ground() {
+        // Thrown at 20 units/s at 45° under gravity -16, the ground at y = -2.
+        let v = Vec2::new(14.142, 14.142);
+        let g = Vec2::new(0.0, -16.0);
+        let dashes = aim_arc(Vec2::ZERO, v, g, |a, b| a.y.min(b.y) <= -2.0);
+        assert!(dashes.len() > 10);
+        // Dashes of 0.03 s with 0.04 s gaps: the second starts at the position after 0.07 s.
+        let second = dashes[1].0;
+        assert!((second.x - v.x * 0.07).abs() < 1e-3);
+        // The last ends on the ground (or just above it, before a gap would reach it).
+        let last = dashes.last().unwrap().1;
+        assert!(last.y > -2.01, "{last:?}");
+        // Without any ground it runs the full 2.5 s.
+        let free = aim_arc(Vec2::ZERO, v, g, |_, _| false);
+        assert_eq!(free.len(), 36);
     }
 }

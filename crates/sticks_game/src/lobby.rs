@@ -1275,6 +1275,14 @@ fn lobby_update(
     for object in std::mem::take(&mut lobby.mouse_downs) {
         screens::mouse_down(lobby, &mut memory, object);
     }
+    // `ShowEndingCheat` → `LevelLoader.GameComplete()` (offline: the lobby's players and mode).
+    if std::mem::take(&mut lobby.screens.show_ending) && net.is_offline() {
+        let players = network::total_players(&memory, net).max(1);
+        *session = Session { mode: memory.mode, difficulty: memory.difficulty, player_count: players, players: memory.session_players(), teams: memory.teams.clone() };
+        source.0 = crate::net::COMPLETE_SCENE.to_owned();
+        next.set(AppState::Loading);
+        return;
+    }
 
     // Presses: mouse clicks, and Escape on a visible `BackButton`.
     let mut presses: Vec<usize> = std::mem::take(&mut clicks.0);
